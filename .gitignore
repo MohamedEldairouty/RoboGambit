@@ -1,0 +1,46 @@
+# === Virtual environments ===
+venv/
+env/
+.venv/
+ENV/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === IDE / Editor ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# === Calibration data (user-specific, regenerated per setup) ===
+# Comment out the next line if you want to commit a default calibration
+config/sqdict.json
+
+# === Logs / temporary ===
+*.log
+logs/
+tmp/
+*.tmp
+
+# === ROS build artifacts (when ROS is integrated) ===
+build/
+devel/
+install/
+log/
+.catkin_workspace
+*.bag
+
+# === OS ===
+Thumbs.db
+ehthumbs.db

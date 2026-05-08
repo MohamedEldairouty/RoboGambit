@@ -1,0 +1,18 @@
+# RoboGambit — Python dependencies for the vision/AI/GUI side
+# Tested on Ubuntu 22.04 / 24.04 with Python 3.10+
+
+# GUI
+PySide6>=6.5,<7.0
+
+# Computer vision
+opencv-python>=4.8,<5.0
+numpy>=1.24,<3.0
+
+# Chess + Stockfish wrapper
+python-chess>=1.999,<2.0
+
+# Stockfish itself is installed via apt:
+#   sudo apt install stockfish
+#
+# If Stockfish ends up at a non-standard path, set STOCKFISH_PATH in
+# config/settings.py.
