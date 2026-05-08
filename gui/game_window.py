@@ -270,6 +270,11 @@ class GameWindow(QMainWindow):
         self.robot_done_btn.clicked.connect(self.on_robot_done_clicked)
         self.robot_done_btn.setEnabled(False)
 
+        # Auto-detect toggle (motion-then-stillness)
+        self.auto_detect_btn = QPushButton("Auto Detect: OFF")
+        self.auto_detect_btn.setCheckable(True)
+        self.auto_detect_btn.clicked.connect(self.on_auto_detect_toggled)
+
         fullscreen_btn = QPushButton("Toggle Fullscreen")
         fullscreen_btn.clicked.connect(self.toggle_fullscreen)
 
@@ -297,6 +302,7 @@ class GameWindow(QMainWindow):
             vision_title.setAlignment(Qt.AlignCenter)
             vision_title.setStyleSheet("color: #00ff99; font-weight: bold;")
             layout.addWidget(vision_title)
+            layout.addWidget(self.auto_detect_btn)
             layout.addWidget(self.camera_ref_btn)
             layout.addWidget(self.detect_move_btn)
             layout.addWidget(self.robot_done_btn)
@@ -404,6 +410,7 @@ class GameWindow(QMainWindow):
         self.vision.move_detected.connect(self._on_vision_move_detected)
         self.vision.status.connect(self._on_vision_status)
         self.vision.error.connect(self._on_vision_error)
+        self.vision.auto_state_changed.connect(self._on_auto_state_changed)
         self.vision.start()
 
     def _stop_vision_thread(self):
@@ -496,10 +503,46 @@ class GameWindow(QMainWindow):
             self.show_game_result()
             return
 
-        # Auto-save a fresh reference frame for the next human move
+        # Reset baseline for the next human move (auto OR manual)
         if self.vision is not None:
-            self.vision.set_reference()
-            self.current_move_label.setText("Reference auto-saved. Make your move.")
+            if self.auto_detect_btn.isChecked():
+                self.vision.set_auto_baseline(self.engine.board.copy())
+                self.current_move_label.setText("Auto-detect armed. Make your move.")
+            else:
+                self.vision.set_reference()
+                self.current_move_label.setText("Reference auto-saved. Make your move.")
+
+    # === Auto-detect handlers ===
+
+    def on_auto_detect_toggled(self, checked):
+        """Toggle continuous auto-detection on/off."""
+        if self.vision is None:
+            self.auto_detect_btn.setChecked(False)
+            return
+
+        if checked:
+            # Disable manual buttons so the user doesn't confuse themselves
+            self.camera_ref_btn.setEnabled(False)
+            self.detect_move_btn.setEnabled(False)
+            self.auto_detect_btn.setText("Auto Detect: ON")
+            self.vision.set_auto_enabled(True, self.engine.board.copy())
+            self.current_move_label.setText("Auto-detect armed. Make your move.")
+        else:
+            self.camera_ref_btn.setEnabled(True)
+            self.detect_move_btn.setEnabled(True)
+            self.auto_detect_btn.setText("Auto Detect: OFF")
+            self.vision.set_auto_enabled(False)
+            self.current_move_label.setText("Manual mode: use Save Reference + Detect Move")
+
+    def _on_auto_state_changed(self, state):
+        """Reflect the worker's state machine in the status label."""
+        labels = {
+            "stable":   "Auto: Watching board (stable)",
+            "motion":   "Auto: Motion detected — keep moving",
+            "pending":  "Auto: Confirming stillness…",
+            "cooldown": "Auto: Move detected; waiting for AI",
+        }
+        self.robot_status_label.setText(labels.get(state, f"Auto: {state}"))
 
     # === AI move pipeline ===
 
@@ -795,6 +838,15 @@ class GameWindow(QMainWindow):
         self.pending_ai_move = None
         self.pending_ai_move_data = None
         self.game_counted = False
+
+        # Reset auto-detect state
+        if self.mode == "ai" and hasattr(self, "auto_detect_btn"):
+            self.auto_detect_btn.setChecked(False)
+            self.auto_detect_btn.setText("Auto Detect: OFF")
+            self.camera_ref_btn.setEnabled(True)
+            self.detect_move_btn.setEnabled(True)
+            if self.vision is not None:
+                self.vision.set_auto_enabled(False)
 
         self.current_move_label.setText(
             "Click 'Save Reference' before your move" if self.mode == "ai" else "Player Move: -"
