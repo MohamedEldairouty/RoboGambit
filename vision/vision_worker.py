@@ -34,6 +34,10 @@ from config.settings import (
 )
 from vision.move_detector import MoveDetector
 
+# Rotation applied to every camera frame before processing.
+# Values: 0, 90, 180, 270 (clockwise degrees).
+# Use this when DroidCam can't rotate but the phone is mounted sideways.
+from config.settings import FRAME_ROTATION
 
 class VisionWorker(QThread):
     # Live preview: emitted on every captured frame (~ PREVIEW_FPS Hz)
@@ -136,6 +140,13 @@ class VisionWorker(QThread):
             if not ret:
                 self.msleep(20)
                 continue
+            # Apply frame rotation if needed (DroidCam workaround)
+            if FRAME_ROTATION == 90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            elif FRAME_ROTATION == 180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+            elif FRAME_ROTATION == 270:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
             with QMutexLocker(self._mutex):
                 self._latest_frame = frame

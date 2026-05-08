@@ -22,6 +22,8 @@ import sys
 import cv2
 import numpy as np
 
+from config.settings import FRAME_ROTATION
+
 # Make the script runnable both as `python -m vision.calibrate`
 # and as `python vision/calibrate.py`.
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -100,6 +102,12 @@ def main():
         ret, frame = cap.read()
         if not ret:
             continue
+        if FRAME_ROTATION == 90:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        elif FRAME_ROTATION == 180:
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
+        elif FRAME_ROTATION == 270:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         vis = frame.copy()
 

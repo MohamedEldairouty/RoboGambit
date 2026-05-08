@@ -19,6 +19,10 @@ SQDICT_PATH = os.path.join(CONFIG_DIR, "sqdict.json")
 # and external USB cam at 1. Run `ls /dev/video*` to see what's connected.
 CAMERA_INDEX = 0
 
+# Frame rotation applied before any processing.
+# 0, 90, 180, 270 (clockwise degrees).
+FRAME_ROTATION = 90
+
 # Live preview frame rate target (Hz). Vision detection is event-driven so
 # this only affects the live feed shown in the GUI.
 PREVIEW_FPS = 20
