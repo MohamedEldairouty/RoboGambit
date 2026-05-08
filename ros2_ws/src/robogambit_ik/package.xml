@@ -13,6 +13,10 @@
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
+  <exec_depend>time</exec_depend>
+  <exec_depend>typing</exec_depend>
+  <exec_depend>Serial</exec_depend>
+  <exec_depend>os</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
