@@ -27,6 +27,11 @@ __pycache__/
 # Comment out the next line if you want to commit a default calibration
 config/sqdict.json
 
+# Arm calibration is hardware-specific. Each robot needs its own.
+# But we DO commit the template file so the IK node has something to load
+# before calibration runs. The template is just placeholder values.
+ros2_ws/src/robogambit_ik/robogambit_ik/arm_config_user.json
+
 # === Logs / temporary ===
 *.log
 logs/
