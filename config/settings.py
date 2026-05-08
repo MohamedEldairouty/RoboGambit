@@ -17,7 +17,7 @@ SQDICT_PATH = os.path.join(CONFIG_DIR, "sqdict.json")
 # === Camera ===
 # Linux camera index. Try 0 first; many laptops have built-in cam at 0
 # and external USB cam at 1. Run `ls /dev/video*` to see what's connected.
-CAMERA_INDEX = 1
+CAMERA_INDEX = 0
 
 # Live preview frame rate target (Hz). Vision detection is event-driven so
 # this only affects the live feed shown in the GUI.
