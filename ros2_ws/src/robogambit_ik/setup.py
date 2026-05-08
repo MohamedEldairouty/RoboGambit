@@ -22,7 +22,7 @@ setup(
         "console_scripts": [
             "ik_node = robogambit_ik.ik_node:main",
             "calibrate_arm = robogambit_ik.calibrate_arm:main",
-            'serial = robogambit_ik.serial_node:main',
+            'serial_node = robogambit_ik.serial_node:main',
         ],
     },
 )
