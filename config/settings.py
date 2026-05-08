@@ -81,4 +81,12 @@ AUTO_MAX_CHANGED_SQUARES = 4
 # === Robot backend ===
 # Switch between "fake" (prints to console) and "ros" (publishes to ROS topic).
 # Your teammates' ROS node should subscribe to whatever ros_robot.py publishes.
-ROBOT_BACKEND = "fake"  # "fake" | "ros"
+ROBOT_BACKEND = "ros"  # "fake" | "ros"
+
+# ROS topic the GUI publishes chess moves to.
+# Hardware team's node should subscribe to this topic. The published message
+# is a std_msgs/String containing UCI-formatted chess moves like "e2e4".
+ROS_MOVE_TOPIC = "/robogambit/move"
+
+# ROS node name for our publisher. Visible in `ros2 node list`.
+ROS_NODE_NAME = "robogambit_gui"

@@ -11,8 +11,23 @@ numpy>=1.24,<3.0
 # Chess + Stockfish wrapper
 python-chess>=1.999,<2.0
 
-# Stockfish itself is installed via apt:
+# === Stockfish (system package) ===
 #   sudo apt install stockfish
+# Auto-detected by config/settings.py. Set STOCKFISH_PATH manually if
+# installed elsewhere.
+
+# === ROS 2 (system package, NOT pip) ===
+# rclpy is not on PyPI. To enable ROBOT_BACKEND="ros":
 #
-# If Stockfish ends up at a non-standard path, set STOCKFISH_PATH in
-# config/settings.py.
+#   1. Install ROS 2 (Humble for 22.04, Jazzy for 24.04):
+#        See https://docs.ros.org/en/humble/Installation.html
+#
+#   2. Source the ROS setup before running the GUI:
+#        source /opt/ros/$ROS_DISTRO/setup.bash
+#
+#   3. Make sure your venv was created with --system-site-packages so it
+#      can see the system-installed rclpy:
+#        python3 -m venv venv --system-site-packages
+#
+# If rclpy isn't available, ROSRobot prints a warning and the GUI keeps
+# running in no-op publish mode — it won't crash.

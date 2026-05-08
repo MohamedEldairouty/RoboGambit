@@ -35,7 +35,17 @@ class RoboGambitApp:
 
     def run(self):
         self.show_menu()
-        sys.exit(self.app.exec())
+        exit_code = self.app.exec()
+
+        # Cleanly shut down ROS context if it was used.
+        # No-op if rclpy was never imported.
+        try:
+            from robot.ros_robot import shutdown_ros
+            shutdown_ros()
+        except Exception:
+            pass
+
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":

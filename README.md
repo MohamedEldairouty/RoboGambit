@@ -166,23 +166,88 @@ move pieces in AI mode (the real board is the source of truth).
 
 ## 🤖 Integrating with ROS / the hardware team
 
-The `robot/` package is designed for clean handoff to the hardware team:
+The `robot/` package handles the bridge to the robotic arm. Two backends:
 
-1. The hardware team fills in `robot/ros_robot.py` with their ROS publisher
-   logic. The `send_move()` method receives a dict with `from`, `to`, `uci`,
-   and `captured_piece` — all the info needed to plan a pick-and-place.
-2. They publish to a topic (suggested: `/robogambit/robot_command`).
-3. Their robot node subscribes and executes.
-4. To activate ROS mode, change one line in `config/settings.py`:
+- **`fake`** (default): prints commands to console — for development without hardware
+- **`ros`**: publishes UCI move strings to a ROS 2 topic — for real hardware
+
+### What we publish
+
+| Field | Value |
+|---|---|
+| Topic | `/robogambit/move` (configurable in `config/settings.py`) |
+| Type | `std_msgs/String` |
+| Payload | UCI move string, e.g. `"e2e4"`, `"g8f6"`, `"e1g1"` (castling), `"e7e8q"` (promotion) |
+| Node name | `robogambit_gui` |
+
+### Hardware team's responsibilities
+
+The hardware team's existing ROS node (subscribed to `/nano_serial`) currently
+forwards strings directly to Arduino. It needs to be modified to:
+
+1. Subscribe to **`/robogambit/move`** instead of `/nano_serial`
+2. Parse the UCI string (`"e2e4"` → from-square `e2`, to-square `e4`)
+3. Run **inverse kinematics** to compute servo angles for pick + place sequence
+4. Publish or forward those angles to Arduino over serial (their existing logic)
+
+Alternatively, they can keep their architecture and add a translator node:
+**`/robogambit/move`** → IK node → **`/nano_serial`** (angles) → existing serial node → Arduino.
+
+### Activating ROS mode on our side
+
+1. Install ROS 2 on your machine:
+   ```bash
+   # Ubuntu 24.04 → ROS 2 Jazzy
+   # Ubuntu 22.04 → ROS 2 Humble
+   ```
+2. Recreate the venv with system site packages so it can see `rclpy`:
+   ```bash
+   rm -rf venv
+   python3 -m venv venv --system-site-packages
+   source venv/bin/activate
+   pip install -r requirements.txt
+   ```
+3. Source ROS in every terminal where you run the GUI:
+   ```bash
+   source /opt/ros/$ROS_DISTRO/setup.bash
+   ```
+4. Switch the backend in `config/settings.py`:
    ```python
-   ROBOT_BACKEND = "ros"   # was "fake"
+   ROBOT_BACKEND = "ros"
+   ```
+5. Run the GUI as usual:
+   ```bash
+   python main.py
    ```
 
-For full ROS integration, the vision worker can also be wrapped in a ROS node
-that publishes detected moves on `/robogambit/detected_move`. The GUI would
-subscribe to that topic instead of receiving Qt signals directly. This is
-straightforward because the move-detection logic in `move_detector.py` is
-already decoupled from Qt.
+### Testing the publisher without the GUI
+
+A standalone test script is included so you can verify ROS publishing
+independently of the GUI / camera:
+
+**Terminal 1** — watch the topic:
+```bash
+source /opt/ros/$ROS_DISTRO/setup.bash
+ros2 topic echo /robogambit/move
+```
+
+**Terminal 2** — publish manually:
+```bash
+cd robogambit
+source venv/bin/activate
+source /opt/ros/$ROS_DISTRO/setup.bash
+python -m scripts.test_publisher
+# Type moves: e2e4, g8f6, etc.
+```
+
+You should see each move appear in Terminal 1.
+
+### Optional future extension
+
+If we ever need to receive feedback from the hardware ("move executed",
+"emergency stop", etc.), we'd add a subscriber alongside the publisher and
+spin a `SingleThreadedExecutor` in a `QThread`. The current publish-only
+design keeps it simple.
 
 ---
 
