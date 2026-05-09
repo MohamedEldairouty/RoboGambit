@@ -126,7 +126,9 @@ class GameWindow(QMainWindow):
         self.square_buttons = {}
         self.legal_target_squares = []
         self.last_move_squares = []
+        self.last_move_was_capture = False
         self.suggested_move_squares = []
+        self.suggested_move_is_capture = False
         self.captured_white = []
         self.captured_black = []
 
@@ -728,6 +730,21 @@ class GameWindow(QMainWindow):
             if m.from_square == source
         ]
 
+    def _would_be_en_passant(self, target_square):
+        """Check if moving the currently selected piece to target_square would
+        be an en passant capture (empty target square, but it's a capture)."""
+        if self.selected_square is None:
+            return False
+        try:
+            from_sq = chess.parse_square(self.selected_square)
+            to_sq = chess.parse_square(target_square)
+            for move in self.engine.board.legal_moves:
+                if move.from_square == from_sq and move.to_square == to_sq:
+                    return self.engine.board.is_en_passant(move)
+        except Exception:
+            pass
+        return False
+
     # === Board rendering ===
 
     def _square_color(self, name):
@@ -740,12 +757,37 @@ class GameWindow(QMainWindow):
         bg = self._square_color(name)
         border = "1px solid #1a1a1a"
 
+        # Last move highlight: yellow normally, red on the capture destination
         if name in self.last_move_squares:
-            bg = "#f7ec6e"
+            is_capture_dest = (
+                self.last_move_was_capture
+                and len(self.last_move_squares) >= 2
+                and name == self.last_move_squares[1]
+            )
+            bg = "#ff5555" if is_capture_dest else "#f7ec6e"
+
+        # Suggested move highlight: purple normally, red on the capture destination
         if name in self.suggested_move_squares:
-            bg = "#c77dff"
+            is_capture_dest = (
+                self.suggested_move_is_capture
+                and len(self.suggested_move_squares) >= 2
+                and name == self.suggested_move_squares[1]
+            )
+            bg = "#ff5555" if is_capture_dest else "#c77dff"
+
+        # Legal-move targets when piece is selected: green normally,
+        # red if moving to that square would capture
         if name in self.legal_target_squares:
-            bg = "#55dd88"
+            target_piece = self.engine.board.piece_at(chess.parse_square(name))
+            if target_piece is not None:
+                bg = "#ff5555"
+            else:
+                # Also check en passant — empty square but the move IS a capture
+                if self._would_be_en_passant(name):
+                    bg = "#ff5555"
+                else:
+                    bg = "#55dd88"
+
         if name == self.selected_square:
             bg = "#00aaff"
             border = "4px solid #ffffff"
@@ -771,6 +813,7 @@ class GameWindow(QMainWindow):
             self._add_captured(captured)
 
         self.last_move_squares = [move_data["from"], move_data["to"]]
+        self.last_move_was_capture = captured is not None
 
         is_ai_label = player_name in ("AI", "White AI", "Black AI") \
             or (self.mode == "ai_pure" and player_name == self.settings["black_name"])
@@ -850,11 +893,13 @@ class GameWindow(QMainWindow):
             chess.square_name(move.from_square),
             chess.square_name(move.to_square),
         ]
+        self.suggested_move_is_capture = self.engine.board.is_capture(move)
         self.ai_move_label.setText(f"Suggested Move: {move}")
         self._update_board_display()
 
     def _clear_suggestion(self):
         self.suggested_move_squares = []
+        self.suggested_move_is_capture = False
         self.ai_move_label.setText("Suggested Move: OFF")
         self._update_board_display()
 
@@ -932,7 +977,9 @@ class GameWindow(QMainWindow):
         self.selected_square = None
         self.legal_target_squares = []
         self.last_move_squares = []
+        self.last_move_was_capture = False
         self.suggested_move_squares = []
+        self.suggested_move_is_capture = False
         self.captured_white = []
         self.captured_black = []
         self.pending_ai_move = None
