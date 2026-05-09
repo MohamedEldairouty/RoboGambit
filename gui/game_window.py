@@ -1,20 +1,19 @@
 """
 Main game window.
 
+Four modes:
+  - ai_robot   : player vs AI, with camera detection + robot arm output
+  - ai_pure    : player vs AI, click-only (no camera, no robot)
+  - pvp        : player vs player, both human, click-only
+  - ai_vs_ai   : demo, both AI, no human input
+
 Threading model:
   - GUI thread:  owns ChessEngine, board UI, all click handlers.
-  - Vision QThread: owns camera, runs MoveDetector. Communicates ONLY via
-    signals: frame_ready (preview), move_detected (uci squares), error/status.
+  - Vision QThread (only in ai_robot mode): owns camera, runs MoveDetector.
+    Communicates with GUI ONLY via signals.
 
-Game flow (AI mode):
-  1. Game starts. Vision thread runs, showing live preview.
-  2. User clicks "Save Reference" before making a physical move.
-  3. User makes their move on the real board, then clicks "Detect Move".
-  4. Vision diff -> emits move_detected(from, to).
-  5. GUI validates move via ChessEngine, updates display.
-  6. GUI asks engine for AI reply, sends to robot (FakeRobot or ROSRobot).
-  7. User clicks "Robot Move Done" once the arm finishes.
-  8. GUI auto-saves new reference frame, ready for next human move.
+Robot backend (only in ai_robot mode): publishes to ROS topic
+(or prints to console if backend is "fake" — see config/settings.py).
 """
 import os
 import sys
@@ -98,14 +97,28 @@ class GameWindow(QMainWindow):
         self.settings = settings
         self.back_callback = back_callback
 
+        # === Per-mode flags so we don't sprinkle string-checks everywhere ===
+        self.uses_camera = (mode == "ai_robot")
+        self.uses_robot = (mode == "ai_robot")
+        self.allows_clicks = mode in ("ai_pure", "pvp")
+        self.is_demo = (mode == "ai_vs_ai")
+
+        # === Hint state (per-mode behaviour) ===
+        # ai_pure: single hint button, default OFF
+        # pvp: two hint buttons (one per player), both default OFF
+        # ai_robot / ai_vs_ai: no hints
+        self.hint_white = False  # PvP: hint for white?  ai_pure: hint for human?
+        self.hint_black = False  # PvP: hint for black?
+
         # === Domain objects ===
         self.engine = ChessEngine()
         self.engine.set_difficulty(settings["difficulty"])
         self.ai_time = self._ai_time_for(settings["difficulty"])
 
-        self.robot = get_robot_backend()
+        # Robot only in ai_robot mode
+        self.robot = get_robot_backend() if self.uses_robot else None
 
-        # Vision worker (only started in AI mode where camera is needed)
+        # Vision only in ai_robot mode
         self.vision = None
 
         # === UI state ===
@@ -124,7 +137,7 @@ class GameWindow(QMainWindow):
         self.total_games = 0
         self.game_counted = False
 
-        # === AI move pipeline state ===
+        # === AI move pipeline state (ai_robot mode only) ===
         self.pending_ai_move = None
         self.pending_ai_move_data = None
 
@@ -156,20 +169,27 @@ class GameWindow(QMainWindow):
         self._update_scoreboard()
 
         # === Mode-specific initialization ===
+        self._init_for_mode()
+
+    def _init_for_mode(self):
         if self.mode == "ai_vs_ai":
             self.mode_label.setText("Mode: AI vs AI Demo")
             self.current_move_label.setText("AI Demo Running...")
-            self.robot_status_label.setText("Robot Status: Demo Mode")
             self.ai_vs_ai_timer.start(1300)
 
         elif self.mode == "pvp":
             self.mode_label.setText("Mode: Player vs Player")
             self.robot_status_label.setText("Robot Status: Not Used")
-            if self.settings["pvp_hints"]:
-                self._update_suggested_move()
+            # Both hints default OFF; no auto-suggest at game start
 
-        else:  # "ai" mode — start the vision thread
+        elif self.mode == "ai_pure":
             self.mode_label.setText("Mode: Player vs AI")
+            self.robot_status_label.setText("Robot Status: Not Used")
+            self.current_move_label.setText("Click a piece to move")
+            # Hint defaults OFF
+
+        else:  # ai_robot
+            self.mode_label.setText("Mode: Player vs AI (Robot)")
             self.current_move_label.setText("Click 'Save Reference' before your move")
             self.robot_status_label.setText("Robot Status: Idle")
             self.ai_move_label.setText("AI Move: -")
@@ -254,12 +274,23 @@ class GameWindow(QMainWindow):
         reset_score_btn = QPushButton("Reset Scoreboard")
         reset_score_btn.clicked.connect(self.reset_scoreboard)
 
-        self.hint_btn = QPushButton(
-            "AI Hint: ON" if self.settings["pvp_hints"] else "AI Hint: OFF"
-        )
-        self.hint_btn.clicked.connect(self.toggle_pvp_hint)
+        # === Hint buttons (per-mode) ===
+        # ai_pure: single hint for the human (white)
+        self.hint_btn_single = QPushButton("AI Hint: OFF")
+        self.hint_btn_single.clicked.connect(self._toggle_hint_single)
 
-        # === Vision/robot controls (AI mode only) ===
+        # pvp: two hint buttons, one per side
+        self.hint_btn_white = QPushButton(
+            f"{self.settings['white_name']} Hint: OFF"
+        )
+        self.hint_btn_white.clicked.connect(self._toggle_hint_white)
+
+        self.hint_btn_black = QPushButton(
+            f"{self.settings['black_name']} Hint: OFF"
+        )
+        self.hint_btn_black.clicked.connect(self._toggle_hint_black)
+
+        # === Vision/robot controls (ai_robot mode only) ===
         self.camera_ref_btn = QPushButton("1. Save Reference")
         self.camera_ref_btn.clicked.connect(self.on_save_reference_clicked)
 
@@ -270,7 +301,6 @@ class GameWindow(QMainWindow):
         self.robot_done_btn.clicked.connect(self.on_robot_done_clicked)
         self.robot_done_btn.setEnabled(False)
 
-        # Auto-detect toggle (motion-then-stillness)
         self.auto_detect_btn = QPushButton("Auto Detect: OFF")
         self.auto_detect_btn.setCheckable(True)
         self.auto_detect_btn.clicked.connect(self.on_auto_detect_toggled)
@@ -281,6 +311,7 @@ class GameWindow(QMainWindow):
         back_btn = QPushButton("Back to Menu")
         back_btn.clicked.connect(self.back_to_menu)
 
+        # === Compose layout ===
         layout.addWidget(title)
         layout.addSpacing(10)
         layout.addWidget(self.mode_label)
@@ -293,10 +324,17 @@ class GameWindow(QMainWindow):
         layout.addWidget(new_match_btn)
         layout.addWidget(reset_score_btn)
 
+        # Mode-specific buttons
         if self.mode == "pvp":
-            layout.addWidget(self.hint_btn)
+            layout.addSpacing(6)
+            layout.addWidget(self.hint_btn_white)
+            layout.addWidget(self.hint_btn_black)
 
-        if self.mode == "ai":
+        elif self.mode == "ai_pure":
+            layout.addSpacing(6)
+            layout.addWidget(self.hint_btn_single)
+
+        elif self.mode == "ai_robot":
             layout.addSpacing(8)
             vision_title = QLabel("— Camera & Robot —")
             vision_title.setAlignment(Qt.AlignCenter)
@@ -348,7 +386,7 @@ class GameWindow(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout()
 
-        title = QLabel("Move + Robot Panel")
+        title = QLabel("Move + Robot Panel" if self.uses_robot else "Move Panel")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("font-size: 20px; font-weight: bold; color: #ff8c00;")
 
@@ -363,8 +401,8 @@ class GameWindow(QMainWindow):
             color: #00ff99; font-size: 14px; font-family: Consolas;
         """)
 
-        # === Camera live preview (AI mode only) ===
-        self.camera_view = QLabel("Camera feed will appear here\n(AI mode only)")
+        # Camera preview only for ai_robot
+        self.camera_view = QLabel("Camera feed will appear here\n(Robot mode only)")
         self.camera_view.setAlignment(Qt.AlignCenter)
         self.camera_view.setMinimumSize(360, 270)
         self.camera_view.setStyleSheet("""
@@ -391,10 +429,21 @@ class GameWindow(QMainWindow):
         layout.addSpacing(6)
         layout.addWidget(self.current_move_label)
         layout.addWidget(self.ai_move_label)
-        layout.addWidget(self.robot_status_label)
-        layout.addWidget(self.robot_preview_label)
-        if self.mode == "ai":
+
+        # Show robot status & preview ONLY in ai_robot mode (the real robot path).
+        # ai_vs_ai, pvp, and ai_pure don't use a robot — hide the widgets entirely.
+        if self.uses_robot:
+            layout.addWidget(self.robot_status_label)
+            layout.addWidget(self.robot_preview_label)
+        else:
+            self.robot_status_label.hide()
+            self.robot_preview_label.hide()
+
+        if self.uses_camera:
             layout.addWidget(self.camera_view, 1)
+        else:
+            self.camera_view.hide()
+
         layout.addWidget(self.captured_label)
         layout.addWidget(history_title)
         layout.addWidget(self.move_history)
@@ -402,7 +451,7 @@ class GameWindow(QMainWindow):
         panel.setLayout(layout)
         return panel
 
-    # === Vision thread lifecycle ===
+    # === Vision thread lifecycle (ai_robot only) ===
 
     def _start_vision_thread(self):
         self.vision = VisionWorker(parent=self)
@@ -423,7 +472,6 @@ class GameWindow(QMainWindow):
     # === Vision signal handlers ===
 
     def _on_vision_frame(self, qimg: QImage):
-        # Scale to fit the camera_view label without distortion
         pix = QPixmap.fromImage(qimg)
         scaled = pix.scaled(
             self.camera_view.size(),
@@ -433,7 +481,6 @@ class GameWindow(QMainWindow):
         self.camera_view.setPixmap(scaled)
 
     def _on_vision_status(self, msg: str):
-        # Show in robot_status_label so it's visible
         self.robot_status_label.setText(f"Vision: {msg}")
 
     def _on_vision_error(self, msg: str):
@@ -441,7 +488,6 @@ class GameWindow(QMainWindow):
         self.move_history.append(f"[VISION ERROR] {msg}")
 
     def _on_vision_move_detected(self, from_sq: str, to_sq: str):
-        """Called from GUI thread (auto-marshalled by Qt) when vision finds a move."""
         if self.pending_ai_move is not None:
             self.current_move_label.setText("Wait — AI move is still pending")
             return
@@ -463,7 +509,7 @@ class GameWindow(QMainWindow):
 
         self._prepare_ai_robot_move()
 
-    # === Vision/robot button handlers ===
+    # === Vision/robot button handlers (ai_robot only) ===
 
     def on_save_reference_clicked(self):
         if self.vision is None:
@@ -478,15 +524,12 @@ class GameWindow(QMainWindow):
         if self.pending_ai_move is not None:
             self.current_move_label.setText("Wait: robot move pending")
             return
-        # Pass a copy of the current board for legal-move disambiguation
         self.vision.request_detection(self.engine.board.copy())
 
     def on_robot_done_clicked(self):
         if self.pending_ai_move is None:
             return
 
-        # Now actually push the AI move onto our board (we held off until
-        # the physical robot finished, to keep GUI in sync with reality)
         self.engine.board.push(self.pending_ai_move)
         self.engine.move_history.append(str(self.pending_ai_move))
 
@@ -503,7 +546,6 @@ class GameWindow(QMainWindow):
             self.show_game_result()
             return
 
-        # Reset baseline for the next human move (auto OR manual)
         if self.vision is not None:
             if self.auto_detect_btn.isChecked():
                 self.vision.set_auto_baseline(self.engine.board.copy())
@@ -512,16 +554,12 @@ class GameWindow(QMainWindow):
                 self.vision.set_reference()
                 self.current_move_label.setText("Reference auto-saved. Make your move.")
 
-    # === Auto-detect handlers ===
-
     def on_auto_detect_toggled(self, checked):
-        """Toggle continuous auto-detection on/off."""
         if self.vision is None:
             self.auto_detect_btn.setChecked(False)
             return
 
         if checked:
-            # Disable manual buttons so the user doesn't confuse themselves
             self.camera_ref_btn.setEnabled(False)
             self.detect_move_btn.setEnabled(False)
             self.auto_detect_btn.setText("Auto Detect: ON")
@@ -535,7 +573,6 @@ class GameWindow(QMainWindow):
             self.current_move_label.setText("Manual mode: use Save Reference + Detect Move")
 
     def _on_auto_state_changed(self, state):
-        """Reflect the worker's state machine in the status label."""
         labels = {
             "stable":   "Auto: Watching board (stable)",
             "motion":   "Auto: Motion detected — keep moving",
@@ -544,11 +581,9 @@ class GameWindow(QMainWindow):
         }
         self.robot_status_label.setText(labels.get(state, f"Auto: {state}"))
 
-    # === AI move pipeline ===
+    # === AI move pipeline (ai_robot mode) ===
 
     def _prepare_ai_robot_move(self):
-        """Compute the AI's reply but DON'T apply it to the board yet —
-        we wait for the physical robot to finish moving first."""
         move = self.engine.get_best_move(time_limit=self.ai_time)
         captured_piece = self.engine.board.piece_at(move.to_square)
 
@@ -571,30 +606,30 @@ class GameWindow(QMainWindow):
 
         self.move_history.append(f"AI Ready: {self.pending_ai_move_data['uci']}")
 
-        # Send to robot backend (FakeRobot prints; ROSRobot publishes)
-        try:
-            self.robot.send_move(self.pending_ai_move_data)
-        except Exception as e:
-            self.move_history.append(f"[ROBOT ERROR] {e}")
+        if self.robot is not None:
+            try:
+                self.robot.send_move(self.pending_ai_move_data)
+            except Exception as e:
+                self.move_history.append(f"[ROBOT ERROR] {e}")
 
         self.robot_done_btn.setEnabled(True)
 
-    # === Click-based moves (PvP / AI-vs-AI / pre-camera fallback) ===
+    # === Click-based moves (ai_pure / pvp) ===
 
     def handle_square_click(self, square_name):
-        if self.mode == "ai":
-            # In AI mode the human plays on the physical board, not by clicking.
-            # Allow clicks only for inspection/highlighting.
+        if self.mode == "ai_robot":
+            # Real-board mode: clicks are inspection-only
             self._inspect_only(square_name)
             return
 
         if self.mode == "ai_vs_ai":
-            return
+            return  # demo, no clicks
 
         if self.engine.board.is_game_over():
             self.show_game_result()
             return
 
+        # === Selection phase ===
         if self.selected_square is None:
             piece = self.engine.board.piece_at(chess.parse_square(square_name))
             if piece is None or piece.color != self.engine.board.turn:
@@ -604,6 +639,7 @@ class GameWindow(QMainWindow):
             self._update_board_display()
             return
 
+        # === Move-execution phase ===
         from_square = self.selected_square
         to_square = square_name
         player_move = from_square + to_square
@@ -618,19 +654,50 @@ class GameWindow(QMainWindow):
             self._update_board_display()
             return
 
-        self._apply_move_visuals(move_data, "Player")
+        # Label move with the player's name (or "Player" for ai_pure)
+        if self.mode == "pvp":
+            # The move was just pushed; turn now belongs to the OTHER side
+            mover = self.settings["white_name"] if self.engine.board.turn == chess.BLACK \
+                else self.settings["black_name"]
+        else:  # ai_pure
+            mover = self.settings["white_name"]
+
+        self._apply_move_visuals(move_data, mover)
 
         if self.engine.board.is_game_over():
             self.show_game_result()
             return
 
-        if self.mode == "pvp" and self.settings["pvp_hints"]:
-            self._update_suggested_move()
+        # === Mode-specific follow-up ===
+        if self.mode == "ai_pure":
+            # AI plays its reply automatically
+            self._update_board_display()
+            QTimer.singleShot(150, self._make_ai_pure_reply)
 
+        elif self.mode == "pvp":
+            self._update_board_display()
+            self._update_pvp_hint_for_current_turn()
+
+    def _make_ai_pure_reply(self):
+        """In ai_pure mode, AI plays a move directly on the GUI board (no robot)."""
+        if self.engine.board.is_game_over():
+            self.show_game_result()
+            return
+
+        move_data = self.engine.make_ai_move(time_limit=self.ai_time)
+        self._apply_move_visuals(move_data, self.settings["black_name"])
         self._update_board_display()
 
+        if self.engine.board.is_game_over():
+            self.show_game_result()
+            return
+
+        # If the human's hint is on, refresh suggestion for the next turn
+        if self.hint_white:
+            self._show_suggestion_for_current_turn()
+
     def _inspect_only(self, square_name):
-        """Allow click highlighting in AI mode without moving pieces."""
+        """Click highlighting in ai_robot mode (no actual move)."""
         if self.engine.board.is_game_over():
             self.show_game_result()
             return
@@ -705,12 +772,16 @@ class GameWindow(QMainWindow):
 
         self.last_move_squares = [move_data["from"], move_data["to"]]
 
-        if player_name in ("AI", "White AI", "Black AI"):
+        is_ai_label = player_name in ("AI", "White AI", "Black AI") \
+            or (self.mode == "ai_pure" and player_name == self.settings["black_name"])
+
+        if is_ai_label:
             self.ai_move_label.setText(f"AI Move: {move_data['uci']}")
-            self.robot_status_label.setText("Robot Status: Simulated Move Sent")
-            self.robot_preview_label.setText(
-                f"Robot Preview:\nPick: {move_data['from']}\nDrop: {move_data['to']}"
-            )
+            if self.uses_robot:
+                self.robot_status_label.setText("Robot Status: Simulated Move Sent")
+                self.robot_preview_label.setText(
+                    f"Robot Preview:\nPick: {move_data['from']}\nDrop: {move_data['to']}"
+                )
         else:
             self.current_move_label.setText(f"Move: {move_data['uci']}")
 
@@ -728,14 +799,52 @@ class GameWindow(QMainWindow):
             f"Captured Black:\n{''.join(self.captured_black) or '-'}"
         )
 
-    # === Hints / suggestions ===
+    # === Hints (per-mode) ===
 
-    def _update_suggested_move(self):
-        if self.mode != "pvp" or not self.settings["pvp_hints"]:
-            self.suggested_move_squares = []
-            self.ai_move_label.setText("Suggested Move: OFF")
+    def _toggle_hint_single(self):
+        """ai_pure: single hint button for the human (white)."""
+        self.hint_white = not self.hint_white
+        self.hint_btn_single.setText(
+            "AI Hint: ON" if self.hint_white else "AI Hint: OFF"
+        )
+        if self.hint_white and self.engine.board.turn == chess.WHITE:
+            self._show_suggestion_for_current_turn()
+        else:
+            self._clear_suggestion()
+
+    def _toggle_hint_white(self):
+        """pvp: hint button for white player."""
+        self.hint_white = not self.hint_white
+        self.hint_btn_white.setText(
+            f"{self.settings['white_name']} Hint: " +
+            ("ON" if self.hint_white else "OFF")
+        )
+        self._update_pvp_hint_for_current_turn()
+
+    def _toggle_hint_black(self):
+        """pvp: hint button for black player."""
+        self.hint_black = not self.hint_black
+        self.hint_btn_black.setText(
+            f"{self.settings['black_name']} Hint: " +
+            ("ON" if self.hint_black else "OFF")
+        )
+        self._update_pvp_hint_for_current_turn()
+
+    def _update_pvp_hint_for_current_turn(self):
+        """Show hint only for the player whose turn it is, IF their hint is on."""
+        if self.engine.board.is_game_over():
+            self._clear_suggestion()
             return
 
+        is_white_turn = self.engine.board.turn == chess.WHITE
+        show = (is_white_turn and self.hint_white) or (not is_white_turn and self.hint_black)
+
+        if show:
+            self._show_suggestion_for_current_turn()
+        else:
+            self._clear_suggestion()
+
+    def _show_suggestion_for_current_turn(self):
         move = self.engine.get_best_move(time_limit=0.25)
         self.suggested_move_squares = [
             chess.square_name(move.from_square),
@@ -744,17 +853,10 @@ class GameWindow(QMainWindow):
         self.ai_move_label.setText(f"Suggested Move: {move}")
         self._update_board_display()
 
-    def toggle_pvp_hint(self):
-        self.settings["pvp_hints"] = not self.settings["pvp_hints"]
-        self.hint_btn.setText(
-            "AI Hint: ON" if self.settings["pvp_hints"] else "AI Hint: OFF"
-        )
-        if self.settings["pvp_hints"]:
-            self._update_suggested_move()
-        else:
-            self.suggested_move_squares = []
-            self.ai_move_label.setText("Suggested Move: OFF")
-            self._update_board_display()
+    def _clear_suggestion(self):
+        self.suggested_move_squares = []
+        self.ai_move_label.setText("Suggested Move: OFF")
+        self._update_board_display()
 
     # === AI vs AI demo ===
 
@@ -797,9 +899,7 @@ class GameWindow(QMainWindow):
             winner = "Black Wins!" if self.engine.board.turn == chess.WHITE else "White Wins!"
             reason = "The king has no escape. Clean finish."
         elif self.engine.board.is_stalemate():
-            title = "♟ STALEMATE ♟"
-            winner = "Draw"
-            reason = "No legal moves, but the king is not in check."
+            title, winner, reason = "♟ STALEMATE ♟", "Draw", "No legal moves, but the king is not in check."
         elif self.engine.board.is_insufficient_material():
             title, winner, reason = "♟ DRAW ♟", "Draw", "Insufficient material to checkmate."
         elif self.engine.board.is_seventyfive_moves():
@@ -839,8 +939,18 @@ class GameWindow(QMainWindow):
         self.pending_ai_move_data = None
         self.game_counted = False
 
-        # Reset auto-detect state
-        if self.mode == "ai" and hasattr(self, "auto_detect_btn"):
+        # Reset hints (always default OFF)
+        self.hint_white = False
+        self.hint_black = False
+        if hasattr(self, "hint_btn_single"):
+            self.hint_btn_single.setText("AI Hint: OFF")
+        if hasattr(self, "hint_btn_white"):
+            self.hint_btn_white.setText(f"{self.settings['white_name']} Hint: OFF")
+        if hasattr(self, "hint_btn_black"):
+            self.hint_btn_black.setText(f"{self.settings['black_name']} Hint: OFF")
+
+        # Reset auto-detect state (ai_robot only)
+        if self.mode == "ai_robot" and hasattr(self, "auto_detect_btn"):
             self.auto_detect_btn.setChecked(False)
             self.auto_detect_btn.setText("Auto Detect: OFF")
             self.camera_ref_btn.setEnabled(True)
@@ -848,14 +958,20 @@ class GameWindow(QMainWindow):
             if self.vision is not None:
                 self.vision.set_auto_enabled(False)
 
-        self.current_move_label.setText(
-            "Click 'Save Reference' before your move" if self.mode == "ai" else "Player Move: -"
-        )
+        # Mode-specific opening message
+        if self.mode == "ai_robot":
+            self.current_move_label.setText("Click 'Save Reference' before your move")
+        elif self.mode == "ai_pure":
+            self.current_move_label.setText("Click a piece to move")
+        elif self.mode == "pvp":
+            self.current_move_label.setText("Player Move: -")
+        else:
+            self.current_move_label.setText("AI Demo Running...")
+
         self.ai_move_label.setText("AI Move: -")
-        self.robot_status_label.setText(
-            "Robot Status: Idle" if self.mode == "ai" else "Robot Status: Idle"
-        )
-        self.robot_preview_label.setText("Robot Preview:\nPick: -\nDrop: -")
+        if self.uses_robot:
+            self.robot_status_label.setText("Robot Status: Idle")
+            self.robot_preview_label.setText("Robot Preview:\nPick: -\nDrop: -")
         self.captured_label.setText("Captured White:\n-\n\nCaptured Black:\n-")
         self.move_history.clear()
         self.robot_done_btn.setEnabled(False)
@@ -864,8 +980,6 @@ class GameWindow(QMainWindow):
 
         if self.mode == "ai_vs_ai":
             self.ai_vs_ai_timer.start(1300)
-        elif self.mode == "pvp" and self.settings["pvp_hints"]:
-            self._update_suggested_move()
 
     def toggle_fullscreen(self):
         if self.isFullScreen():
@@ -876,10 +990,11 @@ class GameWindow(QMainWindow):
     def back_to_menu(self):
         self.ai_vs_ai_timer.stop()
         self._stop_vision_thread()
-        try:
-            self.robot.close()
-        except Exception:
-            pass
+        if self.robot is not None:
+            try:
+                self.robot.close()
+            except Exception:
+                pass
         self.engine.close()
         self.close()
         self.back_callback()
@@ -887,10 +1002,11 @@ class GameWindow(QMainWindow):
     def closeEvent(self, event):
         self.ai_vs_ai_timer.stop()
         self._stop_vision_thread()
-        try:
-            self.robot.close()
-        except Exception:
-            pass
+        if self.robot is not None:
+            try:
+                self.robot.close()
+            except Exception:
+                pass
         try:
             self.engine.close()
         except Exception:

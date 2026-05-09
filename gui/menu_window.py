@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QPushButton, QVBoxLayout,
     QHBoxLayout, QLineEdit, QComboBox, QDialog, QFormLayout,
-    QDialogButtonBox, QCheckBox,
+    QDialogButtonBox,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
@@ -10,11 +10,13 @@ from config.settings import LOGO_PATH
 
 
 class SettingsDialog(QDialog):
+    """Stripped down — only difficulty + player names. No more toggles."""
+
     def __init__(self, settings, parent=None):
         super().__init__(parent)
 
         self.setWindowTitle("RoboGambit Settings")
-        self.setMinimumSize(440, 360)
+        self.setMinimumSize(420, 240)
         self.settings = settings
 
         layout = QFormLayout()
@@ -26,17 +28,9 @@ class SettingsDialog(QDialog):
         self.white_name = QLineEdit(settings["white_name"])
         self.black_name = QLineEdit(settings["black_name"])
 
-        self.hints_checkbox = QCheckBox("Enable AI suggested move in PvP")
-        self.hints_checkbox.setChecked(settings["pvp_hints"])
-
-        self.fullscreen_checkbox = QCheckBox("Start games in fullscreen")
-        self.fullscreen_checkbox.setChecked(settings["fullscreen"])
-
         layout.addRow("AI Difficulty:", self.difficulty_box)
         layout.addRow("White Player Name:", self.white_name)
         layout.addRow("Black Player / AI Name:", self.black_name)
-        layout.addRow("", self.hints_checkbox)
-        layout.addRow("", self.fullscreen_checkbox)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.save_settings)
@@ -57,7 +51,6 @@ class SettingsDialog(QDialog):
                 selection-background-color: #ff8c00; selection-color: black;
                 border: 1px solid #ff8c00;
             }
-            QCheckBox { color: white; font-size: 15px; }
             QPushButton {
                 background-color: #ff8c00; color: black;
                 border-radius: 8px; padding: 8px 16px; font-weight: bold;
@@ -68,8 +61,6 @@ class SettingsDialog(QDialog):
         self.settings["difficulty"] = self.difficulty_box.currentText()
         self.settings["white_name"] = self.white_name.text().strip() or "White"
         self.settings["black_name"] = self.black_name.text().strip() or "Black"
-        self.settings["pvp_hints"] = self.hints_checkbox.isChecked()
-        self.settings["fullscreen"] = self.fullscreen_checkbox.isChecked()
         self.accept()
 
 
@@ -78,12 +69,13 @@ class MenuWindow(QMainWindow):
         super().__init__()
         self.start_game_callback = start_game_callback
 
+        # Settings: simplified. Hints are now per-game-mode and default OFF;
+        # they're toggled inside the game window, not here.
+        # Fullscreen is the default for every mode.
         self.settings = {
             "difficulty": "Medium",
             "white_name": "White",
             "black_name": "Black",
-            "pvp_hints": True,
-            "fullscreen": False,
         }
 
         self.setWindowTitle("RoboGambit Main Menu")
@@ -111,26 +103,35 @@ class MenuWindow(QMainWindow):
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setStyleSheet("font-size: 20px; color: #00ff99;")
 
-        ai_btn = QPushButton("Player vs AI")
+        # === Game mode buttons ===
+        ai_robot_btn = QPushButton("Player vs AI (Robot)")
+        ai_pure_btn = QPushButton("Player vs AI")
         pvp_btn = QPushButton("Player vs Player")
         ai_vs_ai_btn = QPushButton("AI vs AI Demo")
         settings_btn = QPushButton("Settings")
         exit_btn = QPushButton("Exit")
 
-        ai_btn.clicked.connect(lambda: self.start_game_callback("ai", self.settings))
+        ai_robot_btn.clicked.connect(lambda: self.start_game_callback("ai_robot", self.settings))
+        ai_pure_btn.clicked.connect(lambda: self.start_game_callback("ai_pure", self.settings))
         pvp_btn.clicked.connect(lambda: self.start_game_callback("pvp", self.settings))
         ai_vs_ai_btn.clicked.connect(lambda: self.start_game_callback("ai_vs_ai", self.settings))
         settings_btn.clicked.connect(self.open_settings)
         exit_btn.clicked.connect(self.close)
 
+        # First row: the two human-vs-AI modes (the headline features)
         button_row_1 = QHBoxLayout()
-        button_row_1.addWidget(ai_btn)
-        button_row_1.addWidget(pvp_btn)
-        button_row_1.addWidget(ai_vs_ai_btn)
+        button_row_1.addWidget(ai_robot_btn)
+        button_row_1.addWidget(ai_pure_btn)
 
+        # Second row: PvP + demo
         button_row_2 = QHBoxLayout()
-        button_row_2.addWidget(settings_btn)
-        button_row_2.addWidget(exit_btn)
+        button_row_2.addWidget(pvp_btn)
+        button_row_2.addWidget(ai_vs_ai_btn)
+
+        # Third row: settings + exit
+        button_row_3 = QHBoxLayout()
+        button_row_3.addWidget(settings_btn)
+        button_row_3.addWidget(exit_btn)
 
         layout.addWidget(logo)
         layout.addWidget(title)
@@ -139,6 +140,8 @@ class MenuWindow(QMainWindow):
         layout.addLayout(button_row_1)
         layout.addSpacing(10)
         layout.addLayout(button_row_2)
+        layout.addSpacing(10)
+        layout.addLayout(button_row_3)
 
         root.setLayout(layout)
         self.setCentralWidget(root)
@@ -148,7 +151,7 @@ class MenuWindow(QMainWindow):
             QPushButton {
                 background-color: #ff8c00; color: black;
                 border-radius: 14px; padding: 16px 22px;
-                font-size: 17px; font-weight: bold; min-width: 180px;
+                font-size: 17px; font-weight: bold; min-width: 220px;
             }
             QPushButton:hover {
                 background-color: #ffaa33; border: 2px solid white;

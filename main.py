@@ -25,10 +25,8 @@ class RoboGambitApp:
     def start_game(self, mode, settings):
         self.menu.hide()
         self.game = GameWindow(mode, settings, self.return_to_menu)
-        if settings.get("fullscreen", False):
-            self.game.showFullScreen()
-        else:
-            self.game.showMaximized()
+        # All games start fullscreen by default
+        self.game.showFullScreen()
 
     def return_to_menu(self):
         self.show_menu()
@@ -38,7 +36,6 @@ class RoboGambitApp:
         exit_code = self.app.exec()
 
         # Cleanly shut down ROS context if it was used.
-        # No-op if rclpy was never imported.
         try:
             from robot.ros_robot import shutdown_ros
             shutdown_ros()
