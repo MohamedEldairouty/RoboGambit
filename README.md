@@ -60,6 +60,18 @@ Plus: 🎯 **capture-square highlighting**, 🏆 **scoreboard**, ⏱ **move hist
 
 > ▶️ [**Click to watch the GUI demo video**](assets/Demo_Video.mp4)
 
+### 🖼 GUI Screenshots
+
+<p align="center">
+  <img src="assets/GUI_Main_Menu.jpeg" alt="RoboGambit main menu with game mode selection" width="700"/>
+</p>
+<p align="center"><em>Main menu — pick from four game modes</em></p>
+
+<p align="center">
+  <img src="assets/GUI_InGame.jpeg" alt="RoboGambit in-game view with live camera feed and chess board" width="700"/>
+</p>
+<p align="center"><em>In-game view — board, live camera feed, move history, and robot status</em></p>
+
 ### 🎯 Calibrated Chessboard
 
 The vision system maps each of the 64 squares to its pixel polygon, enabling per-square motion detection:
