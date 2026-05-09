@@ -48,10 +48,21 @@ from std_msgs.msg import String
 
 
 # Where to save the calibration. Same folder as ik_node.py.
-ARM_CONFIG_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "arm_config.json",
-)
+def _find_arm_config():
+    candidates = [
+        os.path.join(
+            os.path.expanduser("~"),
+            "Downloads", "robogambit", "ros2_ws", "src",
+            "robogambit_ik", "robogambit_ik", "arm_config.json",
+        ),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "arm_config.json"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
+
+ARM_CONFIG_PATH = _find_arm_config()
 
 
 # Recommended ordering: start at rest, then go through squares in a snake

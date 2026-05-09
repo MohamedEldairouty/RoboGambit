@@ -33,10 +33,24 @@ from std_msgs.msg import String
 
 
 # === Configuration ===
-ARM_CONFIG_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "arm_config.json",
-)
+# Try multiple locations: source folder first (dev), then installed package (production)
+def _find_arm_config():
+    candidates = [
+        # Development: source folder
+        os.path.join(
+            os.path.expanduser("~"),
+            "Downloads", "robogambit", "ros2_ws", "src",
+            "robogambit_ik", "robogambit_ik", "arm_config.json",
+        ),
+        # Installed (if data_files works)
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "arm_config.json"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]  # fall back to first; will fail clearly with right path
+
+ARM_CONFIG_PATH = _find_arm_config()
 
 # Time to wait between waypoints (seconds) so servos can finish moving.
 # Tune this based on your servo speed. Too short = jerky/missed waypoints.

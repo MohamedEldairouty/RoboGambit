@@ -10,6 +10,9 @@ setup(
         ("share/ament_index/resource_index/packages",
             ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
+        # Install arm_config.json alongside the package's installed files
+        ("lib/python3.12/site-packages/" + package_name,
+            [package_name + "/arm_config.json"]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
