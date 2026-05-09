@@ -1,299 +1,232 @@
-# ♟ RoboGambit
+<p align="center">
+  <img src="assets/logo.png" alt="RoboGambit Logo" width="220"/>
+</p>
 
-A robotic chess system: a real player faces a robotic arm on a real board, while
-a camera watches the game and a GUI mirrors every move in real time. The AI
-opponent is powered by Stockfish.
+<h1 align="center">♟ RoboGambit — The AI Chess Robot</h1>
 
-This repo holds the **vision + AI + GUI** side of the project. The hardware
-team's robot/ROS code lives in a separate repo (or sub-folder, TBD) and plugs
-into this one through the `robot/` interface.
-
----
-
-## 🧱 Architecture
-
-```
-            ┌──────────────────────────────────┐
-            │            main.py               │
-            │  PySide6 application entry point │
-            └─────────────┬────────────────────┘
-                          │
-               ┌──────────▼──────────┐
-               │     GameWindow      │
-               │  (GUI thread)       │
-               │  • Owns ChessEngine │
-               │  • Orchestrates all │
-               └─┬───────┬─────────┬─┘
-                 │       │         │
-                 │       │         │
-       ┌─────────▼─┐ ┌───▼──────┐ ┌▼──────────────┐
-       │ ChessEngine│ │VisionWorker│ │ RobotInterface │
-       │            │ │ (QThread)  │ │  (abstract)    │
-       │ • Stockfish│ │ • Camera   │ │ ├─ FakeRobot   │
-       │ • Board    │ │ • Diff det.│ │ └─ ROSRobot    │
-       └────────────┘ └─────┬──────┘ └────────┬───────┘
-                            │ signals          │ ROS topic
-                            │ (move_detected)  │ (later)
-                            ▼                  ▼
-                       MoveDetector      Hardware team's
-                       (pure logic,      ROS node
-                        no Qt)
-```
-
-**Why this split:**
-
-- **Vision is in its own thread** — the camera doesn't freeze the GUI.
-  Communication is via Qt signals, which are thread-safe.
-- **Robot is behind an interface** — swap `FakeRobot` (prints to console) for
-  `ROSRobot` (publishes to a topic) by changing one line in `config/settings.py`.
-- **Pure detector has no Qt or chess engine** — easy to unit test and reuse.
+<p align="center">
+  🤖 Robotic Arm • 📷 Computer Vision • 🧠 Stockfish AI • 🎮 PySide6 GUI
+  <br/>
+  🎓 <em>Academic Project — Intelligent Robotics Course</em>
+</p>
 
 ---
 
-## 📁 Project structure
+## 🧠 Overview
+
+**RoboGambit** is a full-stack chess-playing robotic system that turns a real chessboard into an intelligent opponent.
+
+A camera watches the board, computer vision detects the human's move, **Stockfish** computes the best reply, and a **5-DOF robotic arm** physically picks up and places the piece — all while a polished GUI mirrors the game in real time.
+
+It's chess against a robot that **sees, thinks, and moves**.
+
+---
+
+## ✨ Key Features
+
+### 📷 Computer Vision
+- 🎯 **One-time board calibration** maps each square to pixel coordinates
+- 🔍 **Move detection via frame differencing** — figures out *from-square → to-square* automatically
+- ⚡ **Auto-detect mode** with motion-then-stillness state machine — no buttons, just play
+- 🎥 Live camera preview embedded in the GUI
+
+### 🧠 AI Brain
+- ♟ **Stockfish engine** integrated via `python-chess`
+- 🎚 Three difficulty levels: Easy, Medium, Hard
+- 💡 **Smart move hints** — toggleable per player
+- 🚦 Full rule support: captures, castling, en passant, promotion
+
+### 🤖 Robotic Arm Control
+- 📡 **ROS 2 architecture** with cleanly separated publisher / IK / serial nodes
+- 🎯 Lookup-table-based pick-and-place (calibrated per-square)
+- 🪦 Automatic graveyard handling for captured pieces
+- 🔌 Arduino Nano firmware drives the 5 servos
+
+### 🎮 GUI Modes
+| Mode | Description |
+|---|---|
+| 🤖 **Player vs AI (Robot)** | Play physically on the real board — robot moves the AI's pieces |
+| ♟ **Player vs AI** | Play on screen against Stockfish, no hardware needed |
+| 👥 **Player vs Player** | Two humans, with optional per-player AI hints |
+| 🎬 **AI vs AI Demo** | Watch two Stockfish instances battle |
+
+Plus: 🎯 **capture-square highlighting**, 🏆 **scoreboard**, ⏱ **move history**, 🌗 **dark theme**, 🖥 **fullscreen**.
+
+---
+
+## 📷 The System in Action
+
+### 🎮 GUI Demo
+
+> ▶️ [**Click to watch the GUI demo video**](assets/Demo_Video.mp4)
+
+### 🎯 Calibrated Chessboard
+
+The vision system maps each of the 64 squares to its pixel polygon, enabling per-square motion detection:
+
+<p align="center">
+  <img src="assets/Chess_Board.jpeg" alt="Calibrated chessboard with square labels" width="700"/>
+</p>
+
+### 🦾 The Robot Arm
+
+<!-- TODO: replace with actual hardware photo once the build is finalized -->
+<p align="center">
+  <em>📸 Hardware photo coming soon</em>
+</p>
+
+---
+
+## 🏗 System Architecture
+
+```
+       ┌─────────────────────────┐
+       │   📷 Camera (DroidCam)  │
+       └────────────┬────────────┘
+                    │ frames
+                    ▼
+       ┌─────────────────────────┐         ┌──────────────────────┐
+       │  🎮 PySide6 GUI         │  ◄────  │  🧠 Stockfish        │
+       │  • Vision worker        │         │  (via python-chess)  │
+       │  • Auto-detect FSM      │         └──────────────────────┘
+       │  • Board state          │
+       │  • Robot publisher      │
+       └────────────┬────────────┘
+                    │ /robogambit/move ("e2e4")
+                    ▼
+       ┌─────────────────────────┐
+       │  🧮 IK Translator Node  │
+       │  (chess square → angles)│
+       └────────────┬────────────┘
+                    │ /nano_serial ("90,45,120,60,30")
+                    ▼
+       ┌─────────────────────────┐
+       │  🔌 Serial Bridge Node  │
+       │  (USB to Arduino)       │
+       └────────────┬────────────┘
+                    │ 115200 baud
+                    ▼
+       ┌─────────────────────────┐
+       │  🤖 Arduino + 5 Servos  │
+       └─────────────────────────┘
+```
+
+---
+
+## 📂 Repository Structure
 
 ```
 robogambit/
-├── main.py                    # Application entry point
-├── config/
-│   ├── settings.py            # Camera index, paths, thresholds — edit here
-│   └── sqdict.json            # Calibration data (gitignored, generated)
-├── engine/
-│   └── chess_engine.py        # python-chess + Stockfish wrapper
-├── gui/
-│   ├── menu_window.py         # Main menu (game mode + settings)
-│   └── game_window.py         # In-game window with board, camera, history
-├── vision/
-│   ├── calibrate.py           # One-time board corner calibration tool
-│   ├── move_detector.py       # Pure detection logic (no Qt, no engine)
-│   └── vision_worker.py       # QThread wrapper that emits Qt signals
-├── robot/
-│   ├── robot_interface.py     # Abstract base class + factory
-│   ├── fake_robot.py          # Console-only stub (default)
-│   └── ros_robot.py           # ROS publisher stub (filled in by HW team)
-├── assets/
-│   └── logo.png
-├── scripts/
-│   └── run_calibration.sh     # Convenience launcher for calibration
-├── requirements.txt
-├── .gitignore
-└── README.md
+├── main.py                          # Entry point
+├── config/                          # Camera, paths, thresholds, ROS topics
+├── engine/                          # Stockfish wrapper
+├── gui/                             # PySide6 windows (menu + game)
+├── vision/                          # Calibration + move detector + QThread worker
+├── robot/                           # Backend interface (Fake / ROS publisher)
+├── assets/                          # Logo, demo video, screenshots
+├── ros2_ws/src/robogambit_ik/       # ROS 2 package
+│   ├── robogambit_ik/
+│   │   ├── ik_node.py               # Chess move → servo angles
+│   │   ├── serial_node.py           # ROS → Arduino USB bridge
+│   │   ├── calibrate_arm.py         # Interactive arm calibration
+│   │   └── arm_config.json          # Per-square servo angles
+│   └── arduino/
+│       └── chess_arm_controller/    # Arduino Nano firmware
+└── requirements.txt
 ```
 
 ---
 
-## 🚀 Setup (Ubuntu 22.04+)
+## 🚀 How to Run
 
-### 1. System packages
+### 1️⃣ Software Setup (Ubuntu 22.04+)
 
 ```bash
-sudo apt update
 sudo apt install -y stockfish python3-pip python3-venv
-```
-
-### 2. Clone and create venv
-
-```bash
-git clone <your-repo-url> robogambit
-cd robogambit
-python3 -m venv venv
+git clone https://github.com/MohamedEldairouty/RoboGambit.git
+cd RoboGambit
+python3 -m venv venv --system-site-packages
 source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Find your camera index
+### 2️⃣ Calibrate the Camera (one-time)
+
+Mount your camera (or phone via DroidCam) and run:
 
 ```bash
-ls /dev/video*
+python -m vision.calibrate
 ```
 
-Most laptops have the built-in webcam at `/dev/video0` and external USB cameras
-at `/dev/video1`. Set `CAMERA_INDEX` in `config/settings.py` accordingly.
+Click the 4 corners of the board → press `s` to save.
 
-### 4. Calibrate the board (one-time per setup)
-
-Place your camera in its final fixed position, then:
-
-```bash
-./scripts/run_calibration.sh
-# or:  python -m vision.calibrate
-```
-
-Click the four corners of the board in this order:
-1. top-left (a8 from white's perspective)
-2. top-right (h8)
-3. bottom-right (h1)
-4. bottom-left (a1)
-
-Press `s` to save, `r` to reset, `q` to quit.
-
-If your camera is mounted at an angle (e.g. on the right side of the board),
-pass `--rotate 90` (clockwise rotation of the board relative to the camera):
-
-```bash
-python -m vision.calibrate --rotate 90
-```
-
-This generates `config/sqdict.json`, which maps each chess square to its
-polygon in pixel space.
-
-### 5. Run the game
+### 3️⃣ Run the GUI
 
 ```bash
 python main.py
 ```
 
-Pick **Player vs AI** to use the camera. The other modes (PvP, AI vs AI demo)
-work without a camera.
+That's enough for **Player vs AI**, **PvP**, and **AI vs AI Demo** modes.
+
+### 4️⃣ For Robot Mode (with hardware)
+
+Install ROS 2 Jazzy, then:
+
+```bash
+cd ros2_ws
+colcon build --packages-select robogambit_ik
+source install/setup.bash
+
+# Calibrate arm positions (one-time, ~30 minutes):
+ros2 run robogambit_ik calibrate_arm
+
+# Then in 3 separate terminals:
+ros2 run robogambit_ik serial_node    # USB ↔ Arduino bridge
+ros2 run robogambit_ik ik_node        # Chess moves → servo angles
+python main.py                        # The GUI
+```
+
+Set `ROBOT_BACKEND = "ros"` in `config/settings.py` to enable the publisher.
 
 ---
 
-## 🎮 How to play (AI mode)
+## 🛠 Technologies Used
 
-The flow is button-driven for clarity (mapping cleanly to ROS triggers later):
-
-1. **Save Reference** — captures the "before" frame. Click before each of your moves.
-2. Make your physical move on the real board.
-3. **Detect Human Move** — vision compares before/after, finds your move,
-   GUI updates, AI computes its reply, robot command is sent.
-4. **Robot Move Done** — click after the arm finishes its move. The GUI
-   updates and auto-saves a new reference frame for your next turn.
-
-Click the on-screen squares any time to inspect legal moves — clicks don't
-move pieces in AI mode (the real board is the source of truth).
-
----
-
-## 🤖 Integrating with ROS / the hardware team
-
-The `robot/` package handles the bridge to the robotic arm. Two backends:
-
-- **`fake`** (default): prints commands to console — for development without hardware
-- **`ros`**: publishes UCI move strings to a ROS 2 topic — for real hardware
-
-### What we publish
-
-| Field | Value |
+| Layer | Tools |
 |---|---|
-| Topic | `/robogambit/move` (configurable in `config/settings.py`) |
-| Type | `std_msgs/String` |
-| Payload | UCI move string, e.g. `"e2e4"`, `"g8f6"`, `"e1g1"` (castling), `"e7e8q"` (promotion) |
-| Node name | `robogambit_gui` |
-
-### Hardware team's responsibilities
-
-The hardware team's existing ROS node (subscribed to `/nano_serial`) currently
-forwards strings directly to Arduino. It needs to be modified to:
-
-1. Subscribe to **`/robogambit/move`** instead of `/nano_serial`
-2. Parse the UCI string (`"e2e4"` → from-square `e2`, to-square `e4`)
-3. Run **inverse kinematics** to compute servo angles for pick + place sequence
-4. Publish or forward those angles to Arduino over serial (their existing logic)
-
-Alternatively, they can keep their architecture and add a translator node:
-**`/robogambit/move`** → IK node → **`/nano_serial`** (angles) → existing serial node → Arduino.
-
-### Activating ROS mode on our side
-
-1. Install ROS 2 on your machine:
-   ```bash
-   # Ubuntu 24.04 → ROS 2 Jazzy
-   # Ubuntu 22.04 → ROS 2 Humble
-   ```
-2. Recreate the venv with system site packages so it can see `rclpy`:
-   ```bash
-   rm -rf venv
-   python3 -m venv venv --system-site-packages
-   source venv/bin/activate
-   pip install -r requirements.txt
-   ```
-3. Source ROS in every terminal where you run the GUI:
-   ```bash
-   source /opt/ros/$ROS_DISTRO/setup.bash
-   ```
-4. Switch the backend in `config/settings.py`:
-   ```python
-   ROBOT_BACKEND = "ros"
-   ```
-5. Run the GUI as usual:
-   ```bash
-   python main.py
-   ```
-
-### Testing the publisher without the GUI
-
-A standalone test script is included so you can verify ROS publishing
-independently of the GUI / camera:
-
-**Terminal 1** — watch the topic:
-```bash
-source /opt/ros/$ROS_DISTRO/setup.bash
-ros2 topic echo /robogambit/move
-```
-
-**Terminal 2** — publish manually:
-```bash
-cd robogambit
-source venv/bin/activate
-source /opt/ros/$ROS_DISTRO/setup.bash
-python -m scripts.test_publisher
-# Type moves: e2e4, g8f6, etc.
-```
-
-You should see each move appear in Terminal 1.
-
-### Optional future extension
-
-If we ever need to receive feedback from the hardware ("move executed",
-"emergency stop", etc.), we'd add a subscriber alongside the publisher and
-spin a `SingleThreadedExecutor` in a `QThread`. The current publish-only
-design keeps it simple.
+| **GUI** | PySide6 (Qt) |
+| **Vision** | OpenCV, NumPy |
+| **AI** | Stockfish, python-chess |
+| **Robotics** | ROS 2 Jazzy, rclpy, std_msgs |
+| **Hardware** | Arduino Nano, 5× servos, USB serial |
+| **Camera** | DroidCam (phone-as-webcam) |
 
 ---
 
-## 🛠 Configuration knobs
+## 👥 Team Members
 
-All in `config/settings.py`:
-
-| Variable           | What it controls                                            |
-|--------------------|-------------------------------------------------------------|
-| `CAMERA_INDEX`     | Which `/dev/videoN` to open                                 |
-| `STOCKFISH_PATH`   | Path to Stockfish binary (auto-detected by default)         |
-| `MOVE_THRESHOLD`   | Pixel diff threshold (lower = more sensitive)               |
-| `MIN_CONTOUR_AREA` | Min contour size to be a real change (filters shadow noise) |
-| `PREVIEW_FPS`      | Live camera feed frame rate                                 |
-| `ROBOT_BACKEND`    | `"fake"` or `"ros"`                                         |
+- **[@Mohamed Abdallah Eldairouty](https://github.com/MohamedEldairouty)** – 221001719
+- **[@Youssef Waleed](https://github.com/Youssefwaleed2005 )** – 221000928
+- **[@Ziad Magdi](https://github.com/zyadmagdy127)** – 221010033
+- **Mohamed Ossama** – 221003216 
 
 ---
 
-## 🐛 Troubleshooting
+## 🎓 Academic Context
 
-**"Calibration file not found"**
-Run calibration first: `python -m vision.calibrate`.
+This project was developed as the **Final Project for the Intelligent Robotics Course**.
 
-**"Could not open camera at index N"**
-Check `ls /dev/video*` and update `CAMERA_INDEX` in `config/settings.py`.
-
-**Moves detected wrongly**
-- Make sure lighting is consistent (no moving shadows from the player's hand).
-- Make sure the calibration is precise — re-run it if the camera was bumped.
-- Try lowering `MIN_CONTOUR_AREA` if small pieces are missed, or raising
-  `MOVE_THRESHOLD` if you get false positives from light flicker.
-
-**Stockfish not found**
-`sudo apt install stockfish` should put it at `/usr/games/stockfish`. If you
-built from source, set `STOCKFISH_PATH` manually in `config/settings.py`.
+It demonstrates:
+- 🧩 Real-time computer vision and image processing
+- 🧠 AI engine integration (Stockfish)
+- 🤖 Multi-node ROS 2 architecture
+- 🦾 Inverse kinematics and motion control
+- 🔌 Embedded firmware development
+- 🖥 Full-stack GUI engineering
+- 🧱 System-level design with clean module separation
 
 ---
 
-## 👥 Team
-
-- **Vision / AI / GUI** — this repo
-- **Hardware / Mechanical** — robotic arm design and assembly
-- **ROS / Control** — robot motion planning, fills in `robot/ros_robot.py`
-
----
-
-## 📜 License
-
-TBD — discuss with the team before public release.
+<p align="center">
+  ♟ <strong>RoboGambit</strong> — Smart Moves. Precision Play.
+</p>
