@@ -20,7 +20,9 @@ Logic:
 Special cases:
   - Captures: remove enemy piece to graveyard first, then move attacker.
   - Castling: move king then rook.
-  - Promotion: send pawn to graveyard, place a queen from spare-piece pool.
+  - Promotion: not physically handled (logged as warning) — game continues
+    logically; pawn stays on back rank but is treated as the promoted piece
+    by the engine.
 """
 import json
 import os
@@ -120,10 +122,13 @@ class IKTranslatorNode(Node):
             self._execute_move(from_sq, to_sq)
 
             if promotion:
-                self.get_logger().info(f"Promotion to {promotion}")
-                # The pawn was placed on to_sq; pick it up, send to graveyard,
-                # and place a new piece from the spare pool.
-                self._handle_promotion(to_sq, promotion)
+                # Promotion is not physically handled by the robot (no spare
+                # pieces calibrated). The pawn stays on the back rank.
+                # The GUI still tracks it as the promoted piece internally.
+                self.get_logger().warn(
+                    f"Promotion to {promotion} — physical piece not replaced "
+                    "(no spare pieces calibrated). Game continues logically."
+                )
 
         # Update internal board state
         self._apply_move_to_state(uci)
@@ -199,25 +204,6 @@ class IKTranslatorNode(Node):
         elif uci == "e8c8":  # Black queenside
             self._execute_move("e8", "c8")
             self._execute_move("a8", "d8")
-
-    def _handle_promotion(self, square: str, piece: str):
-        """
-        Promotion is tricky on physical chess: the pawn must be replaced with
-        a new piece. The simplest approach: pre-place spare queens (and other
-        promotion pieces) in dedicated slots off the board.
-        """
-        # 1. Send the pawn (currently on `square`) to the graveyard
-        self._remove_to_graveyard(square)
-
-        # 2. Pick up the spare piece and place it on `square`
-        spare_key = f"spare_{piece}"  # e.g. spare_q, spare_r, spare_b, spare_n
-        if spare_key not in self.arm_config["squares"]:
-            self.get_logger().error(
-                f"No calibrated position for {spare_key}. "
-                f"Add it via calibrate_arm.py."
-            )
-            return
-        self._execute_move(spare_key, square)
 
     # === Helpers ===
 

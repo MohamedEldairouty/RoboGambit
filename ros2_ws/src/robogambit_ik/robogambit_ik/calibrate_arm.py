@@ -31,11 +31,10 @@ KEY CALIBRATION ORDER (recommended):
   1. Find a safe REST position (arm folded, away from board)
   2. Find GRIPPER OPEN and CLOSED angles
   3. For each of the 64 squares: hover + pick
-  4. For graveyard slots (8 white + 8 black off-board positions)
-  5. For spare queens (and other spare promotion pieces)
+  4. For 2 graveyard slots (left and right of the board)
 
 This is the most tedious step in the whole project but only needs to be
-done once. ~30-60 minutes total.
+done once. ~30-45 minutes total.
 """
 import json
 import os
@@ -63,12 +62,9 @@ for rank in range(1, 9):
     SQUARES_IN_ORDER.extend(row)
 
 # Off-board graveyard slots. Just 2 dump zones — captured pieces pile up
-# on the left (white) and right (right). Simpler to calibrate and works fine
+# on the left (white) and right (black). Simpler to calibrate and works fine
 # for a demo since collisions in the pile are visually intentional.
 GRAVEYARD_SLOTS = ["graveyard_white", "graveyard_black"]
-
-# Spare promotion pieces. Place them physically near the board.
-SPARE_SLOTS = ["spare_q", "spare_r", "spare_b", "spare_n"]
 
 
 # Keyboard input on Linux without curses dependency
@@ -162,7 +158,7 @@ def main(args=None):
     node = CalibrationNode()
 
     # Build the full list of targets to calibrate
-    targets = SQUARES_IN_ORDER + GRAVEYARD_SLOTS + SPARE_SLOTS
+    targets = SQUARES_IN_ORDER + GRAVEYARD_SLOTS
     target_idx = 0
 
     delta = 2  # degrees per keypress

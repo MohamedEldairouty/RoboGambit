@@ -46,14 +46,6 @@ def main():
             "pick":  [90, 90, 90, 90],
         }
 
-    # 4 spare promotion pieces
-    for piece in ("q", "r", "b", "n"):
-        slot = f"spare_{piece}"
-        config["squares"][slot] = {
-            "hover": [90, 90, 90, 90],
-            "pick":  [90, 90, 90, 90],
-        }
-
     with open(OUT_PATH, "w") as f:
         json.dump(config, f, indent=2)
 
