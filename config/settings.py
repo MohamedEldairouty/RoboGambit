@@ -30,7 +30,7 @@ PREVIEW_FPS = 20
 # IMPORTANT: This affects BOTH calibration and live tracking. If you change
 # this value, you MUST re-run calibration so sqdict.json matches the new
 # orientation. Otherwise the polygons won't align with the real squares.
-FRAME_ROTATION = 180
+FRAME_ROTATION = 0
 
 # === Stockfish ===
 # Auto-detect first; fall back to apt's default install path.
