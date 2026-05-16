@@ -5,29 +5,31 @@ Subscribes to:
     /robogambit/move        std_msgs/String   UCI move like "e2e4"
 
 Publishes:
-    /nano_serial            std_msgs/String   "angle1,angle2,angle3,angle4,angle5"
+    /nano_serial            std_msgs/String   single-servo commands like "S1 155"
+
+Protocol matches friend's Arduino firmware (arduino/chess_arm_controller):
+  - 9600 baud
+  - One servo per line: "S1 155\n", "S2 80\n", ...
+  - Arduino smoothly interpolates to target (delay set by SPEED command)
+  - Per-servo limits enforced on the Arduino itself
 
 Logic:
   1. Receive UCI move from GUI.
-  2. Look up calibrated angles for source and destination squares.
-  3. Build a pick-and-place sequence:
-       hover_above_from -> pick_at_from -> close_gripper ->
-       hover_above_from -> hover_above_to -> place_at_to ->
-       open_gripper -> hover_above_to -> rest_position
-  4. Publish each waypoint as a comma-separated angle string.
-  5. Wait between waypoints so servos have time to move.
+  2. For each waypoint in the pick-and-place sequence, send the 4 arm
+     servos (S2, S3, S4, S5) to the calibrated angles for the target
+     square, plus a gripper command (S1) when opening or closing.
+  3. Wait between waypoints so servos have time to finish moving.
 
 Special cases:
   - Captures: remove enemy piece to graveyard first, then move attacker.
   - Castling: move king then rook.
-  - Promotion: not physically handled (logged as warning) — game continues
-    logically; pawn stays on back rank but is treated as the promoted piece
-    by the engine.
+  - Promotion: NOT physically handled — logged as warning. The pawn stays
+    on the back rank; engine treats it as the promoted piece logically.
 """
 import json
 import os
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import rclpy
 from rclpy.node import Node
@@ -35,17 +37,32 @@ from std_msgs.msg import String
 
 
 # === Configuration ===
-ARM_CONFIG_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "arm_config.json",
-)
 
-# Time to wait between waypoints (seconds) so servos can finish moving.
-# Tune this based on your servo speed. Too short = jerky/missed waypoints.
-WAYPOINT_DELAY = 1.2
+# Try common locations for arm_config.json (dev path first, then install)
+def _find_arm_config() -> str:
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.expanduser("~/Downloads/robogambit/ros2_ws/src/robogambit_ik/robogambit_ik/arm_config.json"),
+        os.path.join(here, "arm_config.json"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
 
-# Number of servos (matches Arduino firmware)
-NUM_SERVOS = 5
+
+ARM_CONFIG_PATH = _find_arm_config()
+
+# Time between full waypoints (seconds). Tune based on how long the
+# slowest single servo takes to traverse its full range. With the Arduino's
+# default 15 ms/deg and a 180° swing this is ~2.7 s, so 1.5 s is enough
+# for typical moves (~50-80° between adjacent squares).
+WAYPOINT_DELAY = 1.5
+
+# Small delay between individual servo commands within the same waypoint.
+# The Arduino processes them serially but each one is non-blocking once
+# it returns "Done", so spacing them helps avoid serial buffer overflow.
+SUBCOMMAND_DELAY = 0.05
 
 
 class IKTranslatorNode(Node):
@@ -61,8 +78,7 @@ class IKTranslatorNode(Node):
             )
             return
 
-        # Track the chess board state so we know when a move is a capture.
-        # Uses python-chess if available; falls back to a manual flag otherwise.
+        # Track the chess board state to detect captures and special moves.
         try:
             import chess
             self._chess = chess
@@ -74,8 +90,7 @@ class IKTranslatorNode(Node):
             self.board = None
             self._has_chess_lib = False
             self.get_logger().warn(
-                "python-chess not installed. Capture detection will be limited. "
-                "Install: pip install python-chess"
+                "python-chess not installed. Capture detection will be limited."
             )
 
         # ROS pub/sub
@@ -88,9 +103,14 @@ class IKTranslatorNode(Node):
         self.get_logger().info(f"  Listening on:  /robogambit/move")
         self.get_logger().info(f"  Publishing to: /nano_serial")
         self.get_logger().info(f"  Squares loaded: {len(self.arm_config.get('squares', {}))}")
+        self.get_logger().info(f"  Config: {ARM_CONFIG_PATH}")
+
+        # Set Arduino speed if specified
+        if "speed" in self.arm_config:
+            self._send_command(f"SPEED {self.arm_config['speed']}", "set arm speed")
 
         # Send arm to rest on startup
-        self._publish_angles(self.arm_config["rest"], "rest position")
+        self._go_to_rest()
 
     # === Public callback ===
 
@@ -105,121 +125,126 @@ class IKTranslatorNode(Node):
 
         from_sq = uci[:2]
         to_sq = uci[2:4]
-        promotion = uci[4] if len(uci) >= 5 else None  # 'q', 'r', 'b', 'n'
+        promotion = uci[4] if len(uci) >= 5 else None
 
-        # Detect capture and special moves before applying
         is_capture = self._is_capture(uci)
         is_castling = self._is_castling(uci)
 
         if is_castling:
-            self.get_logger().info("Castling move — moving king then rook")
+            self.get_logger().info("Castling — moving king then rook")
             self._execute_castling(uci)
         else:
             if is_capture:
                 self.get_logger().info(f"Capture detected on {to_sq}")
                 self._remove_to_graveyard(to_sq)
-
             self._execute_move(from_sq, to_sq)
 
             if promotion:
-                # Promotion is not physically handled by the robot (no spare
-                # pieces calibrated). The pawn stays on the back rank.
-                # The GUI still tracks it as the promoted piece internally.
                 self.get_logger().warn(
                     f"Promotion to {promotion} — physical piece not replaced "
                     "(no spare pieces calibrated). Game continues logically."
                 )
 
-        # Update internal board state
+        # Sync internal board state
         self._apply_move_to_state(uci)
 
-        # Return to rest position so the arm doesn't block the camera
-        self._publish_angles(self.arm_config["rest"], "rest position")
-
+        # Return arm to rest (clears camera view)
+        self._go_to_rest()
         self.get_logger().info("Move complete\n")
 
-    # === Movement primitives ===
+    # === High-level movement primitives ===
 
     def _execute_move(self, from_sq: str, to_sq: str):
         """Standard pick-and-place: pick up at from_sq, place at to_sq."""
-        sequence = [
-            ("hover", from_sq, "open"),       # arrive over source
-            ("pick",  from_sq, "open"),       # lower
-            ("pick",  from_sq, "close"),      # grab piece
-            ("hover", from_sq, "close"),      # lift
-            ("hover", to_sq,   "close"),      # travel to destination
-            ("pick",  to_sq,   "close"),      # lower
-            ("pick",  to_sq,   "open"),       # release
-            ("hover", to_sq,   "open"),       # retreat
-        ]
-        for height, sq, gripper in sequence:
-            self._move_to(height, sq, gripper)
+        # 1. Open gripper, swing to source square
+        self._open_gripper()
+        self._go_to_square(from_sq)
 
-    def _move_to(self, height: str, square: str, gripper: str):
-        """Move arm to (square, height) with gripper in given state."""
+        # 2. Close gripper (grab the piece)
+        self._close_gripper()
+
+        # 3. Swing to destination square (gripper holding piece)
+        self._go_to_square(to_sq)
+
+        # 4. Open gripper (release)
+        self._open_gripper()
+
+    def _remove_to_graveyard(self, square: str):
+        """Pick up the piece on `square` and drop it in the graveyard."""
+        graveyard_slot = self._next_graveyard_slot(square)
+        if graveyard_slot is None:
+            self.get_logger().error("Could not determine graveyard slot")
+            return
+        self._execute_move(square, graveyard_slot)
+
+    def _execute_castling(self, uci: str):
+        """Castling: move king, then move the rook."""
+        if uci == "e1g1":
+            self._execute_move("e1", "g1")
+            self._execute_move("h1", "f1")
+        elif uci == "e1c1":
+            self._execute_move("e1", "c1")
+            self._execute_move("a1", "d1")
+        elif uci == "e8g8":
+            self._execute_move("e8", "g8")
+            self._execute_move("h8", "f8")
+        elif uci == "e8c8":
+            self._execute_move("e8", "c8")
+            self._execute_move("a8", "d8")
+
+    # === Low-level servo control ===
+
+    def _go_to_square(self, square: str):
+        """Send the 4 arm servos (S2-S5) to a square's calibrated angles."""
         if square not in self.arm_config["squares"]:
             self.get_logger().error(f"Square {square} not calibrated")
             return
 
-        sq_data = self.arm_config["squares"][square]
-        # First 4 servos come from the calibration entry
-        angles = list(sq_data[height])[:4]
-        # 5th servo is the gripper
-        gripper_angle = self.arm_config["gripper_open" if gripper == "open" else "gripper_closed"]
-        angles.append(gripper_angle)
-
-        self._publish_angles(angles, f"{height} {square} grip={gripper}")
-
-    def _remove_to_graveyard(self, square: str):
-        """Captured piece sequence: pick up from `square`, drop in graveyard."""
-        graveyard_slot = self._next_graveyard_slot(square)
-        if graveyard_slot is None:
-            self.get_logger().error("No graveyard slots left!")
-            return
-
-        sequence = [
-            ("hover", square,         "open"),
-            ("pick",  square,         "open"),
-            ("pick",  square,         "close"),
-            ("hover", square,         "close"),
-            ("hover", graveyard_slot, "close"),
-            ("pick",  graveyard_slot, "close"),
-            ("pick",  graveyard_slot, "open"),
-            ("hover", graveyard_slot, "open"),
-        ]
-        for height, sq, gripper in sequence:
-            self._move_to(height, sq, gripper)
-
-    def _execute_castling(self, uci: str):
-        """Castling moves both king and rook. UCI: e1g1, e1c1, e8g8, e8c8."""
-        if uci == "e1g1":  # White kingside
-            self._execute_move("e1", "g1")  # King
-            self._execute_move("h1", "f1")  # Rook
-        elif uci == "e1c1":  # White queenside
-            self._execute_move("e1", "c1")
-            self._execute_move("a1", "d1")
-        elif uci == "e8g8":  # Black kingside
-            self._execute_move("e8", "g8")
-            self._execute_move("h8", "f8")
-        elif uci == "e8c8":  # Black queenside
-            self._execute_move("e8", "c8")
-            self._execute_move("a8", "d8")
-
-    # === Helpers ===
-
-    def _publish_angles(self, angles: List[int], label: str = ""):
-        """Format angles as 'a,b,c,d,e' and publish to /nano_serial."""
-        if len(angles) != NUM_SERVOS:
-            self.get_logger().error(
-                f"Expected {NUM_SERVOS} angles, got {len(angles)}: {angles}"
-            )
-            return
-
-        msg = String()
-        msg.data = ",".join(str(int(a)) for a in angles)
-        self.publisher.publish(msg)
-        self.get_logger().info(f"  -> {msg.data}    ({label})")
+        sq = self.arm_config["squares"][square]
+        # Send S2, S3, S4, S5 in order
+        for servo_key in ("S2", "S3", "S4", "S5"):
+            if servo_key in sq:
+                self._send_command(
+                    f"{servo_key} {int(sq[servo_key])}",
+                    f"{square} {servo_key}",
+                    waypoint=False,
+                )
+        # One waypoint-level pause after all 4 servos sent
         time.sleep(WAYPOINT_DELAY)
+
+    def _go_to_rest(self):
+        """Send all 5 servos to their rest positions."""
+        rest = self.arm_config.get("rest", {})
+        for servo_key in ("S1", "S2", "S3", "S4", "S5"):
+            if servo_key in rest:
+                self._send_command(
+                    f"{servo_key} {int(rest[servo_key])}",
+                    f"rest {servo_key}",
+                    waypoint=False,
+                )
+        time.sleep(WAYPOINT_DELAY)
+
+    def _open_gripper(self):
+        angle = self.arm_config.get("gripper_open", 130)
+        self._send_command(f"S1 {int(angle)}", "gripper OPEN", waypoint=True)
+
+    def _close_gripper(self):
+        angle = self.arm_config.get("gripper_closed", 180)
+        self._send_command(f"S1 {int(angle)}", "gripper CLOSE", waypoint=True)
+
+    def _send_command(self, command: str, label: str = "", waypoint: bool = True):
+        """Publish a single Arduino command (e.g. 'S1 155' or 'SPEED 20').
+
+        waypoint=True means wait WAYPOINT_DELAY after sending (use for full moves).
+        waypoint=False means a short SUBCOMMAND_DELAY (use within a multi-servo move).
+        """
+        msg = String()
+        msg.data = command
+        self.publisher.publish(msg)
+        self.get_logger().info(f"  -> {command}    ({label})")
+        time.sleep(WAYPOINT_DELAY if waypoint else SUBCOMMAND_DELAY)
+
+    # === State tracking helpers ===
 
     def _is_capture(self, uci: str) -> bool:
         if not self._has_chess_lib:
@@ -232,7 +257,6 @@ class IKTranslatorNode(Node):
 
     def _is_castling(self, uci: str) -> bool:
         if not self._has_chess_lib:
-            # Fallback: check known castling UCI strings
             return uci in ("e1g1", "e1c1", "e8g8", "e8c8")
         try:
             move = self._chess.Move.from_uci(uci)
@@ -241,13 +265,11 @@ class IKTranslatorNode(Node):
             return False
 
     def _apply_move_to_state(self, uci: str):
-        """Keep our internal board in sync with what's on the physical board."""
         if not self._has_chess_lib:
             return
         try:
             move = self._chess.Move.from_uci(uci)
             if move not in self.board.legal_moves:
-                # Try with queen promotion
                 move_q = self._chess.Move.from_uci(uci + ("" if len(uci) >= 5 else "q"))
                 if move_q in self.board.legal_moves:
                     move = move_q
@@ -256,17 +278,14 @@ class IKTranslatorNode(Node):
             self.get_logger().warn(f"Could not update internal state: {e}")
 
     def _next_graveyard_slot(self, captured_square: str) -> Optional[str]:
-        """Return the graveyard slot key (just one per color — pieces stack)."""
-        # Determine if the captured piece was white or black
+        """One graveyard per color — pieces pile up."""
         if self._has_chess_lib:
             piece = self.board.piece_at(self._chess.parse_square(captured_square))
             if piece is None:
                 return None
             is_white = piece.color == self._chess.WHITE
         else:
-            # Heuristic fallback when python-chess isn't available
             is_white = int(captured_square[1]) <= 4
-
         return "graveyard_white" if is_white else "graveyard_black"
 
     def _load_arm_config(self) -> Optional[Dict]:

@@ -4,19 +4,20 @@ Firmware that runs on the **Arduino Nano** controlling the 5-servo robotic arm.
 
 ## What it does
 
-- Listens on USB serial (115200 baud) for comma-separated angle strings
-- Format: `"angle1,angle2,angle3,angle4,angle5\n"` (each 0–180 degrees)
-- Drives 5 servos to those positions
+- Listens on USB serial (**9600 baud**) for one servo command at a time
+- Format: `"Sn ANGLE\n"` (e.g. `"S1 155\n"` to set servo 1 to 155°)
+- Performs **smooth interpolated movement** to the target angle (configurable speed)
+- Built-in **per-servo angle limits** prevent damage from out-of-range commands
 
 ## Wiring
 
-| Servo  | Arduino Pin | Function          |
-|--------|-------------|-------------------|
-| Servo 0 | D3         | Joint 0 (base)    |
-| Servo 1 | D5         | Joint 1           |
-| Servo 2 | D6         | Joint 2           |
-| Servo 3 | D9         | Joint 3           |
-| Servo 4 | D10        | Gripper           |
+| Servo  | Arduino Pin | Function       | Safe Range  |
+|--------|-------------|----------------|-------------|
+| S1     | D3          | Gripper        | 130 – 180   |
+| S2     | D5          | Shoulder       |  40 – 180   |
+| S3     | D11         | Elbow          |   0 –  60   |
+| S4     | D9          | Wrist          |  50 – 120   |
+| S5     | D10         | Base rotation  |   0 – 180   |
 
 ⚠️ **Power:** Servos require an external 5V power supply (≥2A).
 The Arduino's USB power is NOT enough — servos will brownout/reset
@@ -33,18 +34,44 @@ the board if powered from USB. Connect:
 4. Tools → Port → select the Nano's `/dev/ttyUSB*` port
 5. Click Upload (→ arrow icon)
 
-After flashing, the serial monitor (115200 baud) should print "Ready" on boot.
+After flashing, open Serial Monitor (9600 baud) — it should print:
+```
+──── Servo Status ────
+  S1: 180°  [130-180]
+  S2: 110°  [40-180]
+  S3: 30°   [0-60]
+  S4: 85°   [50-120]
+  S5: 90°   [0-180]
+  Speed: 15 ms/deg
+──────────────────────
+Commands:  S1 155 | S2 80 | SPEED 20
+Ready.
+```
+
+## Command reference
+
+| Command | Effect |
+|---|---|
+| `S1 155` | Move servo 1 to 155° |
+| `S2 80`  | Move servo 2 to 80° |
+| `SPEED 20` | Set movement speed (1-100 ms per degree, lower = faster) |
+| `STATUS` | Print current positions and limits |
+
+⚠️ Always send `\n` (newline) at the end of each command.
 
 ## Testing without the ROS pipeline
 
-Open the Serial Monitor (Tools → Serial Monitor, 115200 baud, Newline ending),
-type `90,90,90,90,90` and press Enter. All 5 servos should snap to mid-position.
-
-Try `45,90,90,90,90` — only servo 0 should move.
+Open Serial Monitor (9600 baud, Newline line ending):
+```
+S1 155       → gripper closes to 155°
+S5 90        → base rotates to 90°
+SPEED 30     → makes all subsequent moves slower
+STATUS       → prints current positions
+```
 
 ## Integration with ROS
 
-The `serial_node` in this same package opens this Arduino over USB
-(auto-detected by VID/PID), and forwards strings published to
-`/nano_serial` directly to the Arduino. See the parent `README.md`
-for the full pipeline.
+The `ik_node` in this package translates chess moves into a sequence of
+single-servo commands and publishes them to `/nano_serial`. The
+`serial_node` opens the Arduino's USB port and forwards each command
+line directly. See the parent `README.md` for the full pipeline.
