@@ -201,14 +201,23 @@ class IKTranslatorNode(Node):
             return
 
         sq = self.arm_config["squares"][square]
+
+        # Check for missing/null angles (placeholders for uncalibrated squares)
+        missing = [k for k in ("S2", "S3", "S4", "S5") if sq.get(k) is None]
+        if missing:
+            self.get_logger().error(
+                f"Square {square} not calibrated: missing {missing}. "
+                f"Edit arm_config.json to fill in these values."
+            )
+            return
+
         # Send S2, S3, S4, S5 in order
         for servo_key in ("S2", "S3", "S4", "S5"):
-            if servo_key in sq:
-                self._send_command(
-                    f"{servo_key} {int(sq[servo_key])}",
-                    f"{square} {servo_key}",
-                    waypoint=False,
-                )
+            self._send_command(
+                f"{servo_key} {int(sq[servo_key])}",
+                f"{square} {servo_key}",
+                waypoint=False,
+            )
         # One waypoint-level pause after all 4 servos sent
         time.sleep(WAYPOINT_DELAY)
 

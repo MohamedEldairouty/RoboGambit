@@ -131,29 +131,58 @@ def run():
     print("─── Position entry ───")
     print("  For each target, enter 4 numbers: S2 S3 S4 S5 (e.g. '140 25 95 86')")
     print("  Press Enter alone to keep the current value (or skip).")
-    print("  Type 'q' at any prompt to stop entering positions and save.\n")
+    print("  Type 'q' at any prompt to stop entering positions and save.")
+    print("  Type 's' to skip ahead to the next uncalibrated entry.\n")
 
-    for i, target in enumerate(ALL_TARGETS):
+    i = 0
+    while i < len(ALL_TARGETS):
+        target = ALL_TARGETS[i]
         existing = config["squares"].get(target)
-        label = f"[{i+1:2d}/{len(ALL_TARGETS)}] {target}"
-        raw = input(f"  {label} (S2 S3 S4 S5, blank=skip, q=quit): ").strip()
+        is_filled = existing and existing.get("S2") is not None
+        status = "✓" if is_filled else " "
+        label = f"[{i+1:2d}/{len(ALL_TARGETS)}] {status} {target}"
+
+        if is_filled:
+            print(f"  {label}  current: "
+                  f"S2={existing['S2']} S3={existing['S3']} "
+                  f"S4={existing['S4']} S5={existing['S5']}")
+
+        raw = input(f"  {label} (S2 S3 S4 S5, blank=skip, q=quit, s=jump to next empty): ").strip()
         if raw.lower() == "q":
             print("  Stopping early.")
             break
+        if raw.lower() == "s":
+            # Jump to next uncalibrated entry
+            next_empty = None
+            for j in range(i + 1, len(ALL_TARGETS)):
+                t = ALL_TARGETS[j]
+                ex = config["squares"].get(t)
+                if not ex or ex.get("S2") is None:
+                    next_empty = j
+                    break
+            if next_empty is None:
+                print("  No more empty entries. Stopping.")
+                break
+            i = next_empty
+            continue
         if not raw:
+            i += 1
             continue
         parts = raw.split()
         if len(parts) != 4:
             print(f"    ⚠ Need 4 numbers, got {len(parts)}. Skipping.")
+            i += 1
             continue
         try:
             nums = [int(p) for p in parts]
         except ValueError:
             print(f"    ⚠ Not all numbers. Skipping.")
+            i += 1
             continue
         config["squares"][target] = {
             "S2": nums[0], "S3": nums[1], "S4": nums[2], "S5": nums[3],
         }
+        i += 1
 
     # Save after squares so partial progress isn't lost
     save(config)
