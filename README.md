@@ -12,6 +12,8 @@
 
 ---
 
+> 📑 [**View Project Presentation (PDF)**](docs/RoboGambit_Presentation.pdf)
+ 
 ## 🧠 Overview
 
 **RoboGambit** is a full-stack chess-playing robotic system that turns a real chessboard into an intelligent opponent.
