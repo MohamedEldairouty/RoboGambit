@@ -62,6 +62,10 @@ Plus: 🎯 **capture-square highlighting**, 🏆 **scoreboard**, ⏱ **move hist
 
 > ▶️ [**Click to watch the GUI demo video**](assets/Demo_Video.mp4)
 
+### 🦾 Robot Arm Demo
+
+> ▶️ [**Click to watch the robotic arm execute a chess move**](assets/Arm_Demo.mp4)
+
 ### 🖼 GUI Screenshots
 
 <p align="center">
@@ -84,41 +88,31 @@ The vision system maps each of the 64 squares to its pixel polygon, enabling per
 
 ### 🦾 The Robot Arm
 
-<!-- TODO: replace with actual hardware photo once the build is finalized -->
+The 5-DOF arm assembled and wired — Arduino Nano controller, 5 servos, external 5V power supply:
+
 <p align="center">
-  <em>📸 Hardware photo coming soon</em>
+  <img src="assets/Robot_Arm.jpeg" alt="The 5-DOF RoboGambit chess robot arm" width="700"/>
 </p>
+<p align="center"><em>5 servos: gripper, shoulder, elbow, wrist, base rotation</em></p>
 
 ---
 
 ## 🏗 System Architecture
 
 ```
-       ┌─────────────────────────┐
-       │   📷 Camera (DroidCam)  │
-       └────────────┬────────────┘
-                    │ frames
-                    ▼
-       ┌─────────────────────────┐         ┌──────────────────────┐
-       │  🎮 PySide6 GUI         │  ◄────  │  🧠 Stockfish        │
-       │  • Vision worker        │         │  (via python-chess)  │
-       │  • Auto-detect FSM      │         └──────────────────────┘
-       │  • Board state          │
-       │  • Robot publisher      │
-       └────────────┬────────────┘
-                    │ /robogambit/move ("e2e4")
+│ /robogambit/move ("e2e4")
                     ▼
        ┌─────────────────────────┐
        │  🧮 IK Translator Node  │
-       │  (chess square → angles)│
+       │  (chess move → commands)│
        └────────────┬────────────┘
-                    │ /nano_serial ("90,45,120,60,30")
+                    │ /nano_serial ("S2 140", "S1 180", ...)
                     ▼
        ┌─────────────────────────┐
        │  🔌 Serial Bridge Node  │
        │  (USB to Arduino)       │
        └────────────┬────────────┘
-                    │ 115200 baud
+                    │ 9600 baud
                     ▼
        ┌─────────────────────────┐
        │  🤖 Arduino + 5 Servos  │
@@ -140,7 +134,7 @@ robogambit/
 ├── assets/                          # Logo, demo video, screenshots
 ├── ros2_ws/src/robogambit_ik/       # ROS 2 package
 │   ├── robogambit_ik/
-│   │   ├── ik_node.py               # Chess move → servo angles
+│   │   ├── ik_node.py               # Chess move → servo commands
 │   │   ├── serial_node.py           # ROS → Arduino USB bridge
 │   │   ├── calibrate_arm.py         # Interactive arm calibration
 │   │   └── arm_config.json          # Per-square servo angles
