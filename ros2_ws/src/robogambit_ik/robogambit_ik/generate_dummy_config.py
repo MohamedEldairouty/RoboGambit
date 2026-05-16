@@ -38,14 +38,13 @@ def main():
                 "pick":  [90, 90, 90, 90],
             }
 
-    # 16 graveyard slots
+    # 2 graveyard slots (one dump zone per color, pieces stack)
     for color in ("white", "black"):
-        for i in range(8):
-            slot = f"graveyard_{color}_{i}"
-            config["squares"][slot] = {
-                "hover": [90, 90, 90, 90],
-                "pick":  [90, 90, 90, 90],
-            }
+        slot = f"graveyard_{color}"
+        config["squares"][slot] = {
+            "hover": [90, 90, 90, 90],
+            "pick":  [90, 90, 90, 90],
+        }
 
     # 4 spare promotion pieces
     for piece in ("q", "r", "b", "n"):

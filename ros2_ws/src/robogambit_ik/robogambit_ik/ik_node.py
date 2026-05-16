@@ -33,24 +33,10 @@ from std_msgs.msg import String
 
 
 # === Configuration ===
-# Try multiple locations: source folder first (dev), then installed package (production)
-def _find_arm_config():
-    candidates = [
-        # Development: source folder
-        os.path.join(
-            os.path.expanduser("~"),
-            "Downloads", "robogambit", "ros2_ws", "src",
-            "robogambit_ik", "robogambit_ik", "arm_config.json",
-        ),
-        # Installed (if data_files works)
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "arm_config.json"),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return candidates[0]  # fall back to first; will fail clearly with right path
-
-ARM_CONFIG_PATH = _find_arm_config()
+ARM_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "arm_config.json",
+)
 
 # Time to wait between waypoints (seconds) so servos can finish moving.
 # Tune this based on your servo speed. Too short = jerky/missed waypoints.
@@ -72,10 +58,6 @@ class IKTranslatorNode(Node):
                 f"Run calibrate_arm.py first to generate it."
             )
             return
-
-        # Track captured pieces so we know which graveyard slot to use next
-        self.white_captures_used = 0  # White pieces captured BY black
-        self.black_captures_used = 0  # Black pieces captured BY white
 
         # Track the chess board state so we know when a move is a capture.
         # Uses python-chess if available; falls back to a manual flag otherwise.
@@ -288,27 +270,18 @@ class IKTranslatorNode(Node):
             self.get_logger().warn(f"Could not update internal state: {e}")
 
     def _next_graveyard_slot(self, captured_square: str) -> Optional[str]:
-        """Return the next free graveyard slot key."""
-        # Captured square's rank tells us if it was a white or black piece
-        # (white pieces typically captured on ranks 4-8, black on 1-5).
-        # But safer to use our internal board state if we have it.
+        """Return the graveyard slot key (just one per color — pieces stack)."""
+        # Determine if the captured piece was white or black
         if self._has_chess_lib:
             piece = self.board.piece_at(self._chess.parse_square(captured_square))
             if piece is None:
                 return None
             is_white = piece.color == self._chess.WHITE
         else:
-            # Heuristic fallback
+            # Heuristic fallback when python-chess isn't available
             is_white = int(captured_square[1]) <= 4
 
-        if is_white:
-            slot = self.white_captures_used
-            self.white_captures_used += 1
-            return f"graveyard_white_{slot}"
-        else:
-            slot = self.black_captures_used
-            self.black_captures_used += 1
-            return f"graveyard_black_{slot}"
+        return "graveyard_white" if is_white else "graveyard_black"
 
     def _load_arm_config(self) -> Optional[Dict]:
         if not os.path.exists(ARM_CONFIG_PATH):

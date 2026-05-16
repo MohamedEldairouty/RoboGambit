@@ -48,21 +48,10 @@ from std_msgs.msg import String
 
 
 # Where to save the calibration. Same folder as ik_node.py.
-def _find_arm_config():
-    candidates = [
-        os.path.join(
-            os.path.expanduser("~"),
-            "Downloads", "robogambit", "ros2_ws", "src",
-            "robogambit_ik", "robogambit_ik", "arm_config.json",
-        ),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "arm_config.json"),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return candidates[0]
-
-ARM_CONFIG_PATH = _find_arm_config()
+ARM_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "arm_config.json",
+)
 
 
 # Recommended ordering: start at rest, then go through squares in a snake
@@ -73,9 +62,10 @@ for rank in range(1, 9):
     row = [f"{f}{rank}" for f in (files if rank % 2 else reversed(files))]
     SQUARES_IN_ORDER.extend(row)
 
-# Off-board graveyard slots (you'll calibrate these last)
-GRAVEYARD_SLOTS = [f"graveyard_white_{i}" for i in range(8)] + \
-                  [f"graveyard_black_{i}" for i in range(8)]
+# Off-board graveyard slots. Just 2 dump zones — captured pieces pile up
+# on the left (white) and right (right). Simpler to calibrate and works fine
+# for a demo since collisions in the pile are visually intentional.
+GRAVEYARD_SLOTS = ["graveyard_white", "graveyard_black"]
 
 # Spare promotion pieces. Place them physically near the board.
 SPARE_SLOTS = ["spare_q", "spare_r", "spare_b", "spare_n"]
