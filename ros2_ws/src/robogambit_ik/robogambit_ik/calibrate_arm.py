@@ -1,93 +1,82 @@
 """
 Arm calibration tool.
 
-Walk through every chess square + special positions, manually adjust each
-servo angle, and save them all to arm_config.json. The IK node uses this
-file at runtime to look up servo positions for each square.
+Walk through every chess square + graveyard + spare-piece slot, manually
+adjust each servo angle, and save them all to arm_config.json. The IK node
+uses this file at runtime to look up servo positions for each square.
 
 WORKFLOW:
-  1. Run this script. It launches a publisher to /nano_serial.
-  2. Use the keyboard to adjust servo angles in real time:
-       1/q : servo 0 +/-
-       2/w : servo 1 +/-
-       3/e : servo 2 +/-
-       4/r : servo 3 +/-
-     (servo 4 is always the gripper, set during gripper calibration step)
-  3. Press 'h' to record HOVER position, 'p' to record PICK position
-     for the current square. Auto-advances to the next square.
-  4. Press 's' to skip to a specific square (manual entry).
-  5. Press 'g' to enter gripper-calibration mode (find open/closed angles).
-  6. Press 'F' to FINISH and write arm_config.json.
-
-USAGE:
-  cd ~/ros2_ws
-  source install/setup.bash
-  ros2 run robogambit_ik calibrate_arm
-
-  Then, in another terminal, the existing serial bridge node should be
-  running, so each angle update reaches the actual robot in real time.
+  1. Start the serial bridge in another terminal:
+         ros2 run robogambit_ik serial_node
+  2. Run this script:
+         ros2 run robogambit_ik calibrate_arm
+  3. Use the keyboard to adjust servos in real time and record positions.
+     The config is saved to disk after every recording, so you can quit
+     at any time without losing progress.
 
 KEY CALIBRATION ORDER (recommended):
-  1. Find a safe REST position (arm folded, away from board)
-  2. Find GRIPPER OPEN and CLOSED angles
-  3. For each of the 64 squares: hover + pick
-  4. For graveyard slots (8 white + 8 black off-board positions)
-  5. For spare queens (and other spare promotion pieces)
+  1. Find a safe REST pose first (arm folded, away from board) -> press R
+  2. Find GRIPPER OPEN / CLOSED angles                          -> press G / C
+  3. For each of the 64 squares: hover + pick                   -> h / p
+  4. For graveyard slots (8 white + 8 black off-board)
+  5. For spare promotion pieces (q, r, b, n)
 
-This is the most tedious step in the whole project but only needs to be
-done once. ~30-60 minutes total.
+Total time: ~30-60 minutes. Only needs to be done once.
 """
 import json
 import os
 import sys
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
 
-# Where to save the calibration. Same folder as ik_node.py.
-def _find_arm_config():
+# === Where to save the calibration ===
+# Prefer the package source folder so dev edits are visible immediately.
+def _find_arm_config() -> str:
+    here = os.path.dirname(os.path.abspath(__file__))
     candidates = [
+        os.path.join(here, "arm_config.json"),
         os.path.join(
             os.path.expanduser("~"),
             "Downloads", "robogambit", "ros2_ws", "src",
             "robogambit_ik", "robogambit_ik", "arm_config.json",
         ),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "arm_config.json"),
     ]
     for path in candidates:
         if os.path.exists(path):
             return path
     return candidates[0]
 
+
 ARM_CONFIG_PATH = _find_arm_config()
 
 
-# Recommended ordering: start at rest, then go through squares in a snake
-# pattern so you don't have to swing the arm too far between them.
-SQUARES_IN_ORDER = []
-files = "abcdefgh"
-for rank in range(1, 9):
-    row = [f"{f}{rank}" for f in (files if rank % 2 else reversed(files))]
-    SQUARES_IN_ORDER.extend(row)
+# === Target ordering ===
+# Snake pattern through the 64 squares so adjacent moves are short.
+SQUARES_IN_ORDER: List[str] = []
+_files = "abcdefgh"
+for _rank in range(1, 9):
+    _row = [f"{f}{_rank}" for f in (_files if _rank % 2 else reversed(_files))]
+    SQUARES_IN_ORDER.extend(_row)
 
-# Off-board graveyard slots (you'll calibrate these last)
+# Off-board graveyard slots (calibrate after the board)
 GRAVEYARD_SLOTS = [f"graveyard_white_{i}" for i in range(8)] + \
                   [f"graveyard_black_{i}" for i in range(8)]
 
-# Spare promotion pieces. Place them physically near the board.
+# Spare promotion pieces (place them physically off the board)
 SPARE_SLOTS = ["spare_q", "spare_r", "spare_b", "spare_n"]
 
 
-# Keyboard input on Linux without curses dependency
+# === Keyboard input (Linux, no curses dependency) ===
 import termios
 import tty
 import select
 
 
-def get_key_nonblocking(timeout=0.05):
+def get_key_nonblocking(timeout: float = 0.05) -> str:
     """Read one keystroke from stdin, non-blocking. Returns '' if no key."""
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
@@ -101,99 +90,163 @@ def get_key_nonblocking(timeout=0.05):
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
+# Step sizes the user can cycle through with '+' / '-'.
+DELTA_STEPS = [1, 2, 5, 10]
+
+
 class CalibrationNode(Node):
     def __init__(self):
         super().__init__("robogambit_calibrate")
         self.publisher = self.create_publisher(String, "/nano_serial", 10)
-        self.angles = [90, 90, 90, 90, 90]  # current arm pose
         self.config = self._load_existing_or_blank()
-        self.get_logger().info("Calibration node ready. Publishing on /nano_serial")
+        # Start from saved rest if we have one, otherwise neutral 90s.
+        self.angles: List[int] = list(self.config.get("rest", [90, 90, 90, 90, 90]))
+        self.get_logger().info(f"Calibration node ready. Config: {ARM_CONFIG_PATH}")
 
     def _load_existing_or_blank(self) -> Dict:
         if os.path.exists(ARM_CONFIG_PATH):
             try:
                 with open(ARM_CONFIG_PATH, "r") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                # Strip the "DUMMY" comment if present so a real save replaces it.
+                data.pop("_comment", None)
+                data.setdefault("rest", [90, 90, 90, 90, 90])
+                data.setdefault("gripper_open", 90)
+                data.setdefault("gripper_closed", 30)
+                data.setdefault("squares", {})
+                return data
             except Exception:
                 pass
         return {
             "rest": [90, 90, 90, 90, 90],
             "gripper_open": 90,
             "gripper_closed": 30,
-            "squares": {},  # filled in: {"e2": {"hover": [..], "pick": [..]}, ...}
+            "squares": {},
         }
 
-    def publish_pose(self):
-        """Publish current angles to /nano_serial so robot moves there."""
+    def publish_pose(self) -> None:
+        """Publish current angles to /nano_serial so the arm tracks live edits."""
         msg = String()
         msg.data = ",".join(str(int(a)) for a in self.angles)
         self.publisher.publish(msg)
 
-    def save_to_disk(self):
-        with open(ARM_CONFIG_PATH, "w") as f:
+    def publish_angles(self, angles: List[int]) -> None:
+        """Move arm to a specific pose (e.g. previewing a saved square)."""
+        self.angles = [int(a) for a in angles]
+        self.publish_pose()
+
+    def save_to_disk(self) -> None:
+        tmp = ARM_CONFIG_PATH + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(self.config, f, indent=2)
-        print(f"\n[OK] Saved {ARM_CONFIG_PATH}")
-        print(f"     {len(self.config['squares'])} positions recorded")
+        os.replace(tmp, ARM_CONFIG_PATH)
 
 
-def print_status(node, target_label, mode_msg=""):
-    """Clear screen and show current status."""
+def _target_label(target: str, idx: int, total: int, calibrated: bool) -> str:
+    mark = "[done]" if calibrated else "[    ]"
+    return f"{mark}  {target}   ({idx + 1}/{total})"
+
+
+def _is_calibrated(config: Dict, target: str) -> bool:
+    sq = config["squares"].get(target)
+    return bool(sq and "hover" in sq and "pick" in sq)
+
+
+def _progress(config: Dict, group: List[str]) -> str:
+    done = sum(1 for t in group if _is_calibrated(config, t))
+    return f"{done}/{len(group)}"
+
+
+def _read_line_blocking(prompt: str) -> str:
+    """Temporarily restore cooked mode and read a full line (for square-jump input)."""
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)  # ensure cooked
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        return sys.stdin.readline().strip()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def print_status(node: CalibrationNode, target: str, idx: int, total: int,
+                 delta: int, status_msg: str) -> None:
+    """Redraw the TUI. Called only when something actually changed."""
+    cfg = node.config
     os.system("clear")
-    print("=" * 70)
+    print("=" * 72)
     print("  RoboGambit Arm Calibration")
-    print("=" * 70)
-    print(f"  Currently calibrating: {target_label}")
-    if mode_msg:
-        print(f"  {mode_msg}")
+    print("=" * 72)
+    print(f"  Target:  {_target_label(target, idx, total, _is_calibrated(cfg, target))}")
+    print(f"  Progress:  squares {_progress(cfg, SQUARES_IN_ORDER)}   "
+          f"graveyard {_progress(cfg, GRAVEYARD_SLOTS)}   "
+          f"spares {_progress(cfg, SPARE_SLOTS)}")
     print()
-    print(f"  Servo angles:  S0={node.angles[0]:3d}  S1={node.angles[1]:3d}  "
+    print(f"  Live angles:  S0={node.angles[0]:3d}  S1={node.angles[1]:3d}  "
           f"S2={node.angles[2]:3d}  S3={node.angles[3]:3d}  GRIP={node.angles[4]:3d}")
+    print(f"  Saved:  rest={cfg['rest']}   open={cfg['gripper_open']}   closed={cfg['gripper_closed']}")
+    sq_data = cfg["squares"].get(target, {})
+    hov = sq_data.get("hover", "-")
+    pck = sq_data.get("pick", "-")
+    print(f"  This target:  hover={hov}   pick={pck}")
     print()
-    print("  --- Adjust servos (each keypress = +/-2 degrees) ---")
-    print("  Servo 0:  1 (+) / q (-)        Servo 1:  2 (+) / w (-)")
-    print("  Servo 2:  3 (+) / e (-)        Servo 3:  4 (+) / r (-)")
-    print("  Gripper:  5 (+) / t (-)")
+    print(f"  Step size: {delta} deg   (change with + / -)")
     print()
-    print("  --- Actions ---")
-    print("  h    Record HOVER position for current square")
-    print("  p    Record PICK position for current square (also advances)")
-    print("  n    Skip to NEXT square")
-    print("  b    Go BACK to previous square")
-    print("  R    Save current angles as REST position")
-    print("  G    Save current angles' grip as GRIPPER OPEN")
-    print("  C    Save current angles' grip as GRIPPER CLOSED")
-    print("  F    FINISH and write arm_config.json")
-    print("  Q    Quit WITHOUT saving")
-    print("=" * 70)
+    print("  --- Adjust servos ---")
+    print("    Servo 0:  1 (+) / q (-)        Servo 1:  2 (+) / w (-)")
+    print("    Servo 2:  3 (+) / e (-)        Servo 3:  4 (+) / r (-)")
+    print("    Gripper:  5 (+) / t (-)        also: o=open, c=close")
+    print()
+    print("  --- Navigate ---")
+    print("    n  next target        b  previous target        j  jump to square")
+    print("    v  preview saved hover for this target")
+    print("    V  preview saved pick  for this target")
+    print("    z  send arm to REST pose (safety)")
+    print()
+    print("  --- Record (saves to disk immediately) ---")
+    print("    h  record HOVER for current target")
+    print("    p  record PICK for current target (auto-lifts to hover & advances)")
+    print("    R  save current pose as REST")
+    print("    G  save gripper angle as OPEN     C  save gripper angle as CLOSED")
+    print()
+    print("    F  finish              Q  quit")
+    print("=" * 72)
+    if status_msg:
+        print(f"  >> {status_msg}")
+    else:
+        print()
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = CalibrationNode()
+    node.publish_pose()  # snap to starting pose
 
-    # Build the full list of targets to calibrate
     targets = SQUARES_IN_ORDER + GRAVEYARD_SLOTS + SPARE_SLOTS
-    target_idx = 0
-
-    delta = 2  # degrees per keypress
+    idx = 0
+    delta_i = 1  # index into DELTA_STEPS -> default 2 deg
+    status_msg = f"Loaded {len(node.config['squares'])} previously-saved squares."
+    need_redraw = True
 
     try:
-        while target_idx < len(targets):
-            target = targets[target_idx]
-            mode_msg = (
-                f"Move arm to position [{target}]. Press 'h' to save HOVER, "
-                f"'p' to save PICK and advance."
-            )
-            print_status(node, f"{target}  ({target_idx+1}/{len(targets)})", mode_msg)
+        while True:
+            if idx >= len(targets):
+                idx = len(targets) - 1  # clamp
+
+            target = targets[idx]
+            delta = DELTA_STEPS[delta_i]
+
+            if need_redraw:
+                print_status(node, target, idx, len(targets), delta, status_msg)
+                need_redraw = False
 
             key = get_key_nonblocking(timeout=0.1)
-
             if not key:
-                # No input — keep publishing current pose so the arm holds
-                node.publish_pose()
+                node.publish_pose()  # hold pose so servos don't drift
                 continue
 
-            # Servo adjustments
+            # --- Servo adjustments ---
             adjustments = {
                 "1": (0, +delta), "q": (0, -delta),
                 "2": (1, +delta), "w": (1, -delta),
@@ -202,66 +255,155 @@ def main(args=None):
                 "5": (4, +delta), "t": (4, -delta),
             }
             if key in adjustments:
-                idx, d = adjustments[key]
-                node.angles[idx] = max(0, min(180, node.angles[idx] + d))
+                i, d = adjustments[key]
+                node.angles[i] = max(0, min(180, node.angles[i] + d))
                 node.publish_pose()
+                status_msg = f"S{i} = {node.angles[i]}"
+                need_redraw = True
                 continue
 
-            # Record actions
+            # --- Step size ---
+            if key == "+":
+                delta_i = (delta_i + 1) % len(DELTA_STEPS)
+                status_msg = f"Step size = {DELTA_STEPS[delta_i]} deg"
+                need_redraw = True
+                continue
+            if key == "-":
+                delta_i = (delta_i - 1) % len(DELTA_STEPS)
+                status_msg = f"Step size = {DELTA_STEPS[delta_i]} deg"
+                need_redraw = True
+                continue
+
+            # --- Gripper shortcuts ---
+            if key == "o":
+                node.angles[4] = node.config["gripper_open"]
+                node.publish_pose()
+                status_msg = "Gripper -> OPEN"
+                need_redraw = True
+                continue
+            if key == "c":
+                node.angles[4] = node.config["gripper_closed"]
+                node.publish_pose()
+                status_msg = "Gripper -> CLOSED"
+                need_redraw = True
+                continue
+
+            # --- Record actions (autosave after every change) ---
             if key == "h":
-                if target not in node.config["squares"]:
-                    node.config["squares"][target] = {}
+                node.config["squares"].setdefault(target, {})
                 node.config["squares"][target]["hover"] = list(node.angles[:4])
-                print(f"\n  ✓ HOVER recorded for {target}")
+                node.save_to_disk()
+                status_msg = f"HOVER recorded for {target}  (saved)"
+                need_redraw = True
                 continue
 
             if key == "p":
-                if target not in node.config["squares"]:
-                    node.config["squares"][target] = {}
+                node.config["squares"].setdefault(target, {})
                 node.config["squares"][target]["pick"] = list(node.angles[:4])
-                print(f"\n  ✓ PICK recorded for {target}, advancing to next")
-                target_idx += 1
-                continue
-
-            if key == "n":
-                target_idx += 1
-                continue
-
-            if key == "b":
-                target_idx = max(0, target_idx - 1)
+                node.save_to_disk()
+                # Safety: lift back to the saved hover before advancing so the
+                # gripper doesn't drag across pieces on the way to the next square.
+                hover = node.config["squares"][target].get("hover")
+                if hover:
+                    node.publish_angles(list(hover) + [node.angles[4]])
+                if idx + 1 < len(targets):
+                    idx += 1
+                status_msg = f"PICK recorded for {target}  (saved, advanced)"
+                need_redraw = True
                 continue
 
             if key == "R":
                 node.config["rest"] = list(node.angles)
-                print("\n  ✓ REST position saved")
+                node.save_to_disk()
+                status_msg = f"REST pose saved: {node.angles}"
+                need_redraw = True
                 continue
 
             if key == "G":
                 node.config["gripper_open"] = node.angles[4]
-                print(f"\n  ✓ Gripper OPEN angle = {node.angles[4]}")
+                node.save_to_disk()
+                status_msg = f"Gripper OPEN = {node.angles[4]}  (saved)"
+                need_redraw = True
                 continue
 
             if key == "C":
                 node.config["gripper_closed"] = node.angles[4]
-                print(f"\n  ✓ Gripper CLOSED angle = {node.angles[4]}")
+                node.save_to_disk()
+                status_msg = f"Gripper CLOSED = {node.angles[4]}  (saved)"
+                need_redraw = True
                 continue
 
+            # --- Navigation ---
+            if key == "n":
+                if idx + 1 < len(targets):
+                    idx += 1
+                status_msg = f"-> {targets[idx]}"
+                need_redraw = True
+                continue
+
+            if key == "b":
+                idx = max(0, idx - 1)
+                status_msg = f"<- {targets[idx]}"
+                need_redraw = True
+                continue
+
+            if key == "j":
+                name = _read_line_blocking("\n  Jump to (e.g. e4, graveyard_white_3, spare_q): ")
+                if name in targets:
+                    idx = targets.index(name)
+                    status_msg = f"Jumped to {name}"
+                else:
+                    status_msg = f"Unknown target: {name!r}"
+                need_redraw = True
+                continue
+
+            # --- Preview / safety ---
+            if key == "v":
+                hov = node.config["squares"].get(target, {}).get("hover")
+                if hov:
+                    node.publish_angles(list(hov) + [node.angles[4]])
+                    status_msg = f"Previewing HOVER {hov}"
+                else:
+                    status_msg = "No hover recorded for this target yet."
+                need_redraw = True
+                continue
+
+            if key == "V":
+                pck = node.config["squares"].get(target, {}).get("pick")
+                if pck:
+                    node.publish_angles(list(pck) + [node.angles[4]])
+                    status_msg = f"Previewing PICK {pck}"
+                else:
+                    status_msg = "No pick recorded for this target yet."
+                need_redraw = True
+                continue
+
+            if key == "z":
+                node.publish_angles(list(node.config["rest"]))
+                status_msg = "Sent arm to REST pose."
+                need_redraw = True
+                continue
+
+            # --- Finish / quit ---
             if key == "F":
                 node.save_to_disk()
+                print(f"\n[OK] Finished. Saved to {ARM_CONFIG_PATH}")
+                print(f"     {len(node.config['squares'])} positions recorded")
                 break
 
             if key == "Q":
-                print("\n  Quit without saving.")
+                print(f"\nQuit. Last state saved at {ARM_CONFIG_PATH}")
                 break
 
-        else:
-            # Loop completed normally (all targets done)
-            node.save_to_disk()
+            # Unknown key: silently ignore (no redraw needed).
 
     except KeyboardInterrupt:
-        print("\n  Interrupted. Saving partial config...")
-        node.save_to_disk()
+        print(f"\nInterrupted. Last state saved at {ARM_CONFIG_PATH}")
     finally:
+        try:
+            node.save_to_disk()
+        except Exception:
+            pass
         node.destroy_node()
         rclpy.shutdown()
 
