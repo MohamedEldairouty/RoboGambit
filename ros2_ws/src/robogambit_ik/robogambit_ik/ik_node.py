@@ -53,16 +53,14 @@ def _find_arm_config() -> str:
 
 ARM_CONFIG_PATH = _find_arm_config()
 
-# Time between full waypoints (seconds). Tune based on how long the
-# slowest single servo takes to traverse its full range. With the Arduino's
-# default 15 ms/deg and a 180° swing this is ~2.7 s, so 1.5 s is enough
-# for typical moves (~50-80° between adjacent squares).
-WAYPOINT_DELAY = 1.5
+# Time between full waypoints (seconds). Bumped up to give time to watch each
+# move complete. For production speed, reduce back to ~1.5-2.0s.
+WAYPOINT_DELAY = 3.0
 
-# Small delay between individual servo commands within the same waypoint.
-# The Arduino processes them serially but each one is non-blocking once
-# it returns "Done", so spacing them helps avoid serial buffer overflow.
-SUBCOMMAND_DELAY = 0.05
+# Delay between individual servo commands within the same waypoint.
+# Bumped up so each command is visible in the logs and the arm moves
+# one servo at a time clearly. For production speed, reduce back to ~0.05.
+SUBCOMMAND_DELAY = 1.5
 
 
 class IKTranslatorNode(Node):
@@ -136,7 +134,18 @@ class IKTranslatorNode(Node):
         else:
             if is_capture:
                 self.get_logger().info(f"Capture detected on {to_sq}")
-                self._remove_to_graveyard(to_sq)
+                # If anything goes wrong with the capture (no graveyard slot,
+                # uncalibrated target, etc.), log and continue with the move
+                # anyway — better to make a slightly wrong move than crash.
+                try:
+                    captured_ok = self._remove_to_graveyard(to_sq)
+                    if not captured_ok:
+                        self.get_logger().warn(
+                            "Capture handling failed — proceeding with the move "
+                            "anyway. Captured piece will be displaced by attacker."
+                        )
+                except Exception as e:
+                    self.get_logger().error(f"Capture error: {e}")
             self._execute_move(from_sq, to_sq)
 
             if promotion:
@@ -155,27 +164,67 @@ class IKTranslatorNode(Node):
     # === High-level movement primitives ===
 
     def _execute_move(self, from_sq: str, to_sq: str):
-        """Standard pick-and-place: pick up at from_sq, place at to_sq."""
-        # 1. Open gripper, swing to source square
+        """Standard pick-and-place: pick up at from_sq, place at to_sq.
+
+        Servo sequencing prevents the gripper from dragging across pieces:
+        - APPROACHING a square: S5 → S2 → S3 → S4 (wrist drops onto piece LAST)
+        - LEAVING a square:     S4 lifts FIRST, then S5/S2/S3, then S4 descends
+        """
+        # Validate both squares are fully calibrated BEFORE moving
+        for s in (from_sq, to_sq):
+            if s not in self.arm_config["squares"]:
+                self.get_logger().error(
+                    f"{s} not in arm_config — aborting move {from_sq}{to_sq}"
+                )
+                return
+            entry = self.arm_config["squares"][s]
+            missing = [k for k in ("S2", "S3", "S4", "S5") if entry.get(k) is None]
+            if missing:
+                self.get_logger().error(
+                    f"{s} missing {missing} — aborting move {from_sq}{to_sq}. "
+                    f"Calibrate this square in arm_config.json before retrying."
+                )
+                return
+
+        # 1. Open gripper, descend onto source square
         self._open_gripper()
-        self._go_to_square(from_sq)
+        self._go_to_square(from_sq, approaching=True)
 
         # 2. Close gripper (grab the piece)
         self._close_gripper()
 
-        # 3. Swing to destination square (gripper holding piece)
-        self._go_to_square(to_sq)
+        # 3. Lift wrist, swing to destination, descend onto destination
+        self._go_to_square(to_sq, approaching=False)
 
         # 4. Open gripper (release)
         self._open_gripper()
 
-    def _remove_to_graveyard(self, square: str):
-        """Pick up the piece on `square` and drop it in the graveyard."""
+    def _remove_to_graveyard(self, square: str) -> bool:
+        """Pick up the piece on `square` and drop it in the graveyard.
+
+        Returns True if the capture was successfully handled, False otherwise.
+        Caller should still execute the rest of the move even if this fails.
+        """
         graveyard_slot = self._next_graveyard_slot(square)
         if graveyard_slot is None:
             self.get_logger().error("Could not determine graveyard slot")
-            return
+            return False
+
+        # Verify both the captured square and the graveyard slot are calibrated
+        for s in (square, graveyard_slot):
+            if s not in self.arm_config["squares"]:
+                self.get_logger().error(f"{s} not in arm_config — skipping capture")
+                return False
+            entry = self.arm_config["squares"][s]
+            if any(entry.get(k) is None for k in ("S2", "S3", "S4", "S5")):
+                self.get_logger().error(
+                    f"{s} not fully calibrated — skipping capture. "
+                    f"Calibrate this position in arm_config.json."
+                )
+                return False
+
         self._execute_move(square, graveyard_slot)
+        return True
 
     def _execute_castling(self, uci: str):
         """Castling: move king, then move the rook."""
@@ -194,8 +243,16 @@ class IKTranslatorNode(Node):
 
     # === Low-level servo control ===
 
-    def _go_to_square(self, square: str):
-        """Send the 4 arm servos (S2-S5) to a square's calibrated angles."""
+    def _go_to_square(self, square: str, approaching: bool = True):
+        """Send the 4 arm servos to a square's calibrated angles.
+
+        Servo order: S2 → S3 → S5 → S4 (wrist LAST so it descends onto
+        the piece only after the arm is correctly aligned over the square).
+
+        approaching=True   → first time going to a square. No pre-lift.
+        approaching=False  → leaving a square. Lifts S4 first, then runs the
+                             same S2 → S3 → S5 → S4 sequence on the target.
+        """
         if square not in self.arm_config["squares"]:
             self.get_logger().error(f"Square {square} not calibrated")
             return
@@ -211,26 +268,77 @@ class IKTranslatorNode(Node):
             )
             return
 
-        # Send S2, S3, S4, S5 in order
-        for servo_key in ("S2", "S3", "S4", "S5"):
+        # 1. Lift the wrist FIRST if we're carrying a piece away from a square.
+        #    Use a generous "safe lift" angle so the gripper clears all pieces.
+        if not approaching:
+            lift_angle = self.arm_config.get("wrist_lift", 60)  # safe high wrist
+            self._send_command(
+                f"S4 {int(lift_angle)}",
+                f"lift wrist before move",
+                waypoint=False,
+            )
+
+        # 2. Send S2 (shoulder) → S3 (elbow) → S5 (base rotation).
+        #    The wrist (S4) is intentionally LAST so it descends onto the piece
+        #    only after the arm is correctly aligned over the square.
+        for servo_key in ("S2", "S3", "S5"):
             self._send_command(
                 f"{servo_key} {int(sq[servo_key])}",
                 f"{square} {servo_key}",
                 waypoint=False,
             )
-        # One waypoint-level pause after all 4 servos sent
+
+        # 3. Finally drop S4 (wrist) onto the target square.
+        self._send_command(
+            f"S4 {int(sq['S4'])}",
+            f"{square} S4 (descend)",
+            waypoint=False,
+        )
+
+        # One waypoint-level pause after all servos sent
         time.sleep(WAYPOINT_DELAY)
 
     def _go_to_rest(self):
-        """Send all 5 servos to their rest positions."""
+        """Send all 5 servos to their rest positions.
+
+        Order: S4(lift) → S2 → S3 → S5 → S4(settle) → S1
+        Wrist lifts first so it clears the board; gripper changes LAST.
+        """
         rest = self.arm_config.get("rest", {})
-        for servo_key in ("S1", "S2", "S3", "S4", "S5"):
+
+        # 1. Lift the wrist away from the board first
+        lift_angle = self.arm_config.get("wrist_lift", 60)
+        self._send_command(
+            f"S4 {int(lift_angle)}",
+            "lift wrist before rest",
+            waypoint=False,
+        )
+
+        # 2. Move arm joints: S2 → S3 → S5
+        for servo_key in ("S2", "S3", "S5"):
             if servo_key in rest:
                 self._send_command(
                     f"{servo_key} {int(rest[servo_key])}",
                     f"rest {servo_key}",
                     waypoint=False,
                 )
+
+        # 3. Settle S4 (wrist) to its rest angle
+        if "S4" in rest:
+            self._send_command(
+                f"S4 {int(rest['S4'])}",
+                "rest S4 (settle)",
+                waypoint=False,
+            )
+
+        # 4. Finally, set S1 (gripper) to its rest state — LAST
+        if "S1" in rest:
+            self._send_command(
+                f"S1 {int(rest['S1'])}",
+                "rest S1",
+                waypoint=False,
+            )
+
         time.sleep(WAYPOINT_DELAY)
 
     def _open_gripper(self):
@@ -260,7 +368,17 @@ class IKTranslatorNode(Node):
             return False
         try:
             move = self._chess.Move.from_uci(uci)
-            return self.board.is_capture(move)
+            if not self.board.is_capture(move):
+                return False
+            # Only report a capture if we can actually identify the piece on
+            # the destination square. If the internal board has drifted from
+            # reality (common during manual test moves), is_capture() might
+            # return True but piece_at() returns None — meaning we don't know
+            # which graveyard to send the captured piece to. In that case, skip.
+            piece = self.board.piece_at(move.to_square)
+            if piece is None and not self.board.is_en_passant(move):
+                return False
+            return True
         except Exception:
             return False
 

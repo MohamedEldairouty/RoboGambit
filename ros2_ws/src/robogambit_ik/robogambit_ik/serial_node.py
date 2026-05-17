@@ -29,7 +29,7 @@ from serial.tools.list_ports import comports
 # === Configuration ===
 BAUDRATE = 9600
 RETRY_DELAY = 2
-TIMEOUT_DELAY = 2
+TIMEOUT_DELAY = 0.2  # short timeout — we actively poll for Done. response
 
 # USB identifiers for the Arduino Nano (CH340 clone)
 # Use `lsusb` or `udevadm info` to find your board's actual values.
@@ -87,8 +87,17 @@ class Arduino:
                         pass
                 self._connection = connection
                 self._log(f"Arduino connected on {port} @ {BAUDRATE} baud")
-                # Arduino resets on serial open; give it time to print "Ready."
-                time.sleep(2.0)
+                # Arduino resets on serial open; wait for it to finish booting
+                # and drain the boot banner so it doesn't get mixed with the
+                # replies of the first real commands.
+                time.sleep(2.5)
+                drained = 0
+                while connection.in_waiting:
+                    line = connection.readline().decode(errors="ignore").strip()
+                    if line:
+                        drained += 1
+                if drained:
+                    self._log(f"Drained {drained} lines of boot banner")
                 return
             except Exception as e:
                 self._log(f"Connection error: {e}, retrying...")
@@ -132,11 +141,22 @@ class SerialBridgeNode(Node):
         self.arduino.connect()
         self.get_logger().info("Arduino ready.")
 
+        # Use a LARGE queue depth — the Arduino takes ~0.5-2s per command due
+        # to smooth-movement, while the IK node fires commands every ~50ms.
+        # Without a deep queue, ROS drops the oldest messages and the arm
+        # skips servo positions.
         self.subscription = self.create_subscription(
-            String, "/nano_serial", self.on_command, 10,
+            String, "/nano_serial", self.on_command, 200,
         )
 
     def on_command(self, msg: String):
+        """Process a single Arduino command synchronously.
+
+        Each command is fully completed (we wait for the Arduino's "Done."
+        reply) before this callback returns. This means the next queued
+        ROS message can't be processed until this one finishes — which is
+        exactly what we want so commands aren't reordered or lost.
+        """
         cmd = msg.data.strip()
         self.get_logger().info(f"Sending: {cmd}")
         try:
@@ -145,11 +165,19 @@ class SerialBridgeNode(Node):
             self.get_logger().error("Failed to write to Arduino")
             return
 
-        # Drain any reply lines (not required, just nice to see in the log)
-        reply = self.arduino.read()
-        while reply:
-            self.get_logger().info(f"  reply: {reply}")
-            reply = self.arduino.read()
+        # Wait for the Arduino's "Done." line (or timeout). The Arduino
+        # always emits one or two intermediate lines like "S1: 180 -> 168"
+        # followed by "Done." — we stop reading as soon as we see "Done."
+        deadline = time.monotonic() + 5.0  # max 5s per command
+        while time.monotonic() < deadline:
+            line = self.arduino.read()
+            if line is None or line == "":
+                continue
+            self.get_logger().info(f"  reply: {line}")
+            if line.startswith("Done") or line.startswith("Error") \
+                    or line.startswith("Unknown") or line.startswith("Speed"):
+                return
+        self.get_logger().warn(f"Timeout waiting for Done. on command: {cmd}")
 
 
 def main(args=None):
